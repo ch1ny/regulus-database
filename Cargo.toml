@@ -1,6 +1,16 @@
 [package]
 name = "regulus-db"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
+thiserror = "2"
+indexmap = "2"
+
+[dev-dependencies]
+tempfile = "3"
+criterion = "0.5"
+
+[[bench]]
+name = "benchmarks"
+harness = false
