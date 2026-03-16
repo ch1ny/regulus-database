@@ -110,6 +110,64 @@ fn bench_query_no_index(c: &mut Criterion) {
     group.finish();
 }
 
+/// 基准测试：查询性能（有索引）
+fn bench_query_with_index(c: &mut Criterion) {
+    let mut group = c.benchmark_group("query_with_index");
+
+    // 准备数据
+    let db = Database::new();
+    db.create_table("users", vec![
+        Column::new("id", DataType::integer()),
+        Column::new("name", DataType::text()),
+        Column::new("age", DataType::integer()),
+    ]).unwrap();
+
+    // 为 age 列创建索引
+    db.create_index("users", "age").unwrap();
+
+    for i in 0..1000 {
+        db.insert("users", vec![
+            ("id", DbValue::integer(i)),
+            ("name", DbValue::text(format!("User{}", i))),
+            ("age", DbValue::integer(20 + (i % 50))),
+        ]).unwrap();
+    }
+
+    group.bench_function("query_eq_filter_indexed", |b| {
+        b.iter(|| {
+            let results = db.query("users")
+                .eq("age", DbValue::integer(30))
+                .execute()
+                .unwrap();
+            black_box(results.len())
+        })
+    });
+
+    group.bench_function("query_range_filter_indexed", |b| {
+        b.iter(|| {
+            let results = db.query("users")
+                .gt("age", DbValue::integer(40))
+                .lt("age", DbValue::integer(50))
+                .execute()
+                .unwrap();
+            black_box(results.len())
+        })
+    });
+
+    group.bench_function("query_multiple_conditions_indexed", |b| {
+        b.iter(|| {
+            let results = db.query("users")
+                .gt("age", DbValue::integer(30))
+                .lt("age", DbValue::integer(50))
+                .execute()
+                .unwrap();
+            black_box(results.len())
+        })
+    });
+
+    group.finish();
+}
+
 /// 基准测试：排序性能
 fn bench_order_by(c: &mut Criterion) {
     let mut group = c.benchmark_group("order_by");
@@ -280,6 +338,7 @@ criterion_group!(
     benches,
     bench_insert,
     bench_query_no_index,
+    bench_query_with_index,
     bench_order_by,
     bench_pagination,
     bench_update_delete,

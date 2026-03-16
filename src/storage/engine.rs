@@ -1,4 +1,5 @@
-use crate::types::{DbValue, TableSchema, DbResult, DbError};
+use crate::types::{DbValue, TableSchema, DbResult, DbError, SchemaError};
+use crate::index::IndexManager;
 use indexmap::IndexMap;
 use std::collections::HashMap;
 
@@ -93,12 +94,87 @@ pub trait StorageEngine {
 /// 内存存储引擎实现
 pub struct MemoryEngine {
     tables: HashMap<String, Table>,
+    /// 索引管理器
+    indexes: IndexManager,
 }
 
 impl MemoryEngine {
     pub fn new() -> Self {
         MemoryEngine {
             tables: HashMap::new(),
+            indexes: IndexManager::new(),
+        }
+    }
+
+    /// 为表列创建索引
+    pub fn create_index(&mut self, table: &str, column: &str) -> DbResult<()> {
+        // 检查表是否存在
+        if !self.has_table(table) {
+            return Err(DbError::TableNotFound(table.to_string()));
+        }
+
+        // 检查列是否存在
+        let schema = self.get_schema(table)?;
+        if !schema.columns.iter().any(|c| c.name == column) {
+            return Err(DbError::SchemaError(SchemaError::UnknownColumn {
+                table: table.to_string(),
+                column: column.to_string(),
+            }));
+        }
+
+        // 创建索引
+        self.indexes.create_index(table, column);
+
+        // 构建索引：扫描现有数据
+        if let Some(index) = self.indexes.get_index_mut(table, column) {
+            if let Some(tbl) = self.tables.get(table) {
+                for (row_id, row) in tbl.iter() {
+                    if let Some(value) = row.get(column) {
+                        index.insert(value.clone(), row_id);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// 删除索引
+    pub fn drop_index(&mut self, table: &str, column: &str) -> DbResult<bool> {
+        Ok(self.indexes.drop_index(table, column))
+    }
+
+    /// 检查列是否有索引
+    pub fn has_index(&self, table: &str, column: &str) -> bool {
+        self.indexes.has_index(table, column)
+    }
+
+    /// 获取索引（不可变引用）
+    pub fn get_index(&self, table: &str, column: &str) -> Option<&crate::index::BTreeIndex> {
+        self.indexes.get_index(table, column)
+    }
+
+    /// 获取索引（可变引用）
+    pub fn get_index_mut(&mut self, table: &str, column: &str) -> Option<&mut crate::index::BTreeIndex> {
+        self.indexes.get_index_mut(table, column)
+    }
+
+    /// 删除表的所有索引
+    pub fn drop_table_indexes(&mut self, table: &str) {
+        self.indexes.drop_table_indexes(table);
+    }
+
+    /// 从索引中删除键值对（用于 delete 操作）
+    pub fn remove_from_index(&mut self, table: &str, column: &str, key: &DbValue, row_id: RowId) {
+        if let Some(index) = self.indexes.get_index_mut(table, column) {
+            index.remove(key, row_id);
+        }
+    }
+
+    /// 向索引添加键值对（用于 insert 操作）
+    pub fn add_to_index(&mut self, table: &str, column: &str, key: DbValue, row_id: RowId) {
+        if let Some(index) = self.indexes.get_index_mut(table, column) {
+            index.insert(key, row_id);
         }
     }
 }
@@ -122,6 +198,8 @@ impl StorageEngine for MemoryEngine {
         self.tables
             .remove(name)
             .ok_or_else(|| DbError::TableNotFound(name.to_string()))?;
+        // 删除表的所有索引
+        self.drop_table_indexes(name);
         Ok(())
     }
 
@@ -146,7 +224,25 @@ impl StorageEngine for MemoryEngine {
         let values: Vec<(String, DbValue)> = row.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         tbl.schema.validate(&values)?;
 
-        Ok(tbl.insert(row))
+        // 先获取需要索引的列和值（在插入之前）
+        let indexed_columns: Vec<String> = self.indexes.get_table_indexes(table)
+            .into_iter()
+            .cloned()
+            .collect();
+
+        let index_entries: Vec<(String, DbValue)> = indexed_columns
+            .iter()
+            .filter_map(|column| row.get(column).map(|v| (column.clone(), v.clone())))
+            .collect();
+
+        let row_id = tbl.insert(row);
+
+        // 更新索引
+        for (column, value) in index_entries {
+            self.add_to_index(table, &column, value, row_id);
+        }
+
+        Ok(row_id)
     }
 
     fn get(&self, table: &str, row_id: RowId) -> DbResult<Option<&Row>> {
@@ -158,31 +254,85 @@ impl StorageEngine for MemoryEngine {
     }
 
     fn update(&mut self, table: &str, row_id: RowId, values: Row) -> DbResult<()> {
-        let tbl = self
-            .tables
-            .get_mut(table)
-            .ok_or_else(|| DbError::TableNotFound(table.to_string()))?;
+        // 先获取有索引的列
+        let indexed_columns: Vec<String> = {
+            self.indexes.get_table_indexes(table)
+                .into_iter()
+                .cloned()
+                .collect()
+        };
 
-        // 验证 schema
+        // 获取旧值（用于从索引中删除）
+        let indexed_columns_clone = indexed_columns.clone();
+        let old_values: Vec<(String, DbValue)> = {
+            let tbl = self.tables.get(table).unwrap();
+            let row = tbl.get(row_id).ok_or_else(|| DbError::RowNotFound)?;
+            indexed_columns_clone
+                .iter()
+                .filter_map(|col| row.get(col).map(|v| (col.clone(), v.clone())))
+                .collect()
+        };
+
+        // 验证 schema 并更新行
+        let tbl = self.tables.get_mut(table)
+            .ok_or_else(|| DbError::TableNotFound(table.to_string()))?;
         let values_ref: Vec<(String, DbValue)> = values.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         tbl.schema.validate(&values_ref)?;
 
-        let row = tbl
-            .get_mut(row_id)
-            .ok_or_else(|| DbError::RowNotFound)?;
-
-        // 更新指定的列
+        let row = tbl.get_mut(row_id).ok_or_else(|| DbError::RowNotFound)?;
         for (key, value) in values {
             row.insert(key, value);
+        }
+
+        // 获取新值（用于添加到索引）
+        let new_values: Vec<(String, DbValue)> = {
+            let tbl = self.tables.get(table)
+                .ok_or_else(|| DbError::TableNotFound(table.to_string()))?;
+            let row = tbl.get(row_id)
+                .ok_or_else(|| DbError::RowNotFound)?;
+            indexed_columns
+                .iter()
+                .filter_map(|col| row.get(col).map(|v| (col.clone(), v.clone())))
+                .collect()
+        };
+
+        // 更新索引：先删除旧值
+        for (column, value) in old_values {
+            self.remove_from_index(table, &column, &value, row_id);
+        }
+
+        // 添加新值到索引
+        for (column, value) in new_values {
+            self.add_to_index(table, &column, value, row_id);
         }
 
         Ok(())
     }
 
     fn delete(&mut self, table: &str, row_id: RowId) -> DbResult<Option<Row>> {
-        let tbl = self
-            .tables
-            .get_mut(table)
+        // 先获取有索引的列和要删除的行数据（避免借用冲突）
+        let indexed_columns: Vec<String> = self.indexes.get_table_indexes(table)
+            .into_iter()
+            .cloned()
+            .collect();
+
+        let row_data = {
+            let tbl = self.tables.get(table)
+                .ok_or_else(|| DbError::TableNotFound(table.to_string()))?;
+            tbl.get(row_id).cloned()
+        };
+
+        // 从索引中删除
+        if let Some(row_data) = &row_data {
+            for column in &indexed_columns {
+                if let Some(value) = row_data.get(column) {
+                    self.remove_from_index(table, column, value, row_id);
+                }
+            }
+        }
+
+        // 删除行
+        let tbl = self.tables.get_mut(table)
             .ok_or_else(|| DbError::TableNotFound(table.to_string()))?;
         Ok(tbl.remove(row_id))
     }

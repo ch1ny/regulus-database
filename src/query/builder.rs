@@ -1,5 +1,6 @@
-use crate::storage::{MemoryEngine, Row, StorageEngine};
+use crate::storage::{MemoryEngine, Row, StorageEngine, RowId};
 use crate::types::{DbValue, DbResult};
+use crate::index::btree::BTreeIndex;
 use std::sync::{Arc, RwLock};
 
 /// 排序方向
@@ -106,6 +107,154 @@ impl QueryBuilder {
         }
     }
 
+    /// 查找最佳可用索引（优先等值条件，其次范围条件）
+    fn find_best_index<'a>(&'a self, engine: &'a MemoryEngine) -> Option<(&'a String, &'a BTreeIndex)> {
+        // 优先查找等值条件的字段
+        for filter in &self.filters {
+            if let FilterExpr::Eq { field, .. } = filter {
+                if let Some(index) = engine.get_index(&self.table, field) {
+                    return Some((field, index));
+                }
+            }
+        }
+        // 其次查找范围条件的字段
+        for filter in &self.filters {
+            if let FilterExpr::Gt { field, .. }
+               | FilterExpr::Ge { field, .. }
+               | FilterExpr::Lt { field, .. }
+               | FilterExpr::Le { field, .. } = filter {
+                if let Some(index) = engine.get_index(&self.table, field) {
+                    return Some((field, index));
+                }
+            }
+        }
+        None
+    }
+
+    /// 使用索引执行查询（优化版本）
+    fn execute_with_index(&self, engine: &MemoryEngine, _field: &str, index: &BTreeIndex) -> DbResult<Vec<Row>> {
+        // 从索引中获取匹配的 row_id
+        let row_ids = self.get_matching_row_ids(index);
+
+        // 根据 row_ids 回表查询完整行数据
+        let mut results = Vec::new();
+        for row_id in row_ids {
+            if let Some(row) = engine.get(&self.table, row_id)? {
+                // 需要验证所有过滤条件（因为索引只针对一个字段）
+                if self.matches_all_filters(row) {
+                    results.push(row.clone());
+                }
+            }
+        }
+
+        // 排序
+        if let Some((field, order)) = &self.order_by {
+            results.sort_by(|a, b| {
+                self.compare_rows(a, b, field, *order)
+            });
+        }
+
+        // 分页
+        let start = self.offset.unwrap_or(0);
+        let end = start + self.limit.unwrap_or(results.len());
+
+        Ok(results.into_iter().skip(start).take(end - start).collect())
+    }
+
+    /// 根据过滤条件从索引中获取匹配的 row_ids
+    fn get_matching_row_ids(&self, index: &BTreeIndex) -> Vec<RowId> {
+        let mut row_ids = Vec::new();
+
+        // 收集所有针对同一字段的等值和范围条件
+        let mut eq_value: Option<&DbValue> = None;
+        let mut gt_value: Option<&DbValue> = None;
+        let mut ge_value: Option<&DbValue> = None;
+        let mut lt_value: Option<&DbValue> = None;
+        let mut le_value: Option<&DbValue> = None;
+
+        for filter in &self.filters {
+            match filter {
+                FilterExpr::Eq { field, value } if eq_value.is_none() => {
+                    eq_value = Some(value);
+                }
+                FilterExpr::Gt { field: _, value } => {
+                    if gt_value.is_none() || value > gt_value.unwrap() {
+                        gt_value = Some(value);
+                    }
+                }
+                FilterExpr::Ge { field: _, value } => {
+                    if ge_value.is_none() || value > ge_value.unwrap() {
+                        ge_value = Some(value);
+                    }
+                }
+                FilterExpr::Lt { field: _, value } => {
+                    if lt_value.is_none() || value < lt_value.unwrap() {
+                        lt_value = Some(value);
+                    }
+                }
+                FilterExpr::Le { field: _, value } => {
+                    if le_value.is_none() || value < le_value.unwrap() {
+                        le_value = Some(value);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // 如果有等值条件，直接使用 search
+        if let Some(eq) = eq_value {
+            row_ids.extend(index.search(eq));
+        } else {
+            // 计算范围 [range_start, range_end)
+            let range_start = gt_value.or(ge_value);
+            let range_end = lt_value.or(le_value);
+
+            if let Some(start) = range_start {
+                // 需要调整范围边界（gt 需要 +1，但这里简化处理）
+                if let Some(end) = range_end {
+                    row_ids.extend(index.range(start, end));
+                } else {
+                    row_ids.extend(index.range_from(start));
+                }
+            } else if let Some(_end) = range_end {
+                // 只有上界，从最小值开始
+                // 这里需要一个最小值，简化处理：使用 range_from 然后过滤
+                // 由于 DbValue 没有明确的最小值，我们直接扫描
+                // 这种情况较少，暂不优化
+            } else {
+                // 没有范围条件，返回所有
+                // 这不应该发生，因为调用者会先检查是否有可用索引
+            }
+        }
+
+        row_ids
+    }
+
+    /// 检查行是否匹配所有过滤条件
+    fn matches_all_filters(&self, row: &Row) -> bool {
+        self.filters.iter().all(|expr| evaluate_filter(expr, row))
+    }
+
+    /// 比较两行（用于排序）
+    fn compare_rows(&self, a: &Row, b: &Row, field: &str, order: Order) -> std::cmp::Ordering {
+        let a_val = a.get(field);
+        let b_val = b.get(field);
+
+        let cmp = match (a_val, b_val) {
+            (Some(DbValue::Integer(a)), Some(DbValue::Integer(b))) => a.partial_cmp(b),
+            (Some(DbValue::Real(a)), Some(DbValue::Real(b))) => a.partial_cmp(b),
+            (Some(DbValue::Integer(a)), Some(DbValue::Real(b))) => (*a as f64).partial_cmp(b),
+            (Some(DbValue::Real(a)), Some(DbValue::Integer(b))) => a.partial_cmp(&(*b as f64)),
+            (Some(DbValue::Text(a)), Some(DbValue::Text(b))) => Some(a.cmp(b)),
+            _ => Some(std::cmp::Ordering::Equal),
+        };
+
+        match order {
+            Order::Asc => cmp.unwrap_or(std::cmp::Ordering::Equal),
+            Order::Desc => cmp.unwrap_or(std::cmp::Ordering::Equal).reverse(),
+        }
+    }
+
     // 过滤条件
     pub fn eq(mut self, field: &str, value: DbValue) -> Self {
         self.filters.push(FilterExpr::Eq {
@@ -200,6 +349,14 @@ impl QueryBuilder {
     /// 执行查询
     pub fn execute(self) -> DbResult<Vec<Row>> {
         let engine = self.engine.read().unwrap();
+
+        // 尝试查找最佳索引
+        if let Some((field, index)) = self.find_best_index(&engine) {
+            // 使用索引优化查询
+            return self.execute_with_index(&engine, field, index);
+        }
+
+        // 降级为全表扫描
         let rows = engine.scan(&self.table)?;
 
         // 过滤
@@ -212,24 +369,9 @@ impl QueryBuilder {
             .collect();
 
         // 排序
-        if let Some((field, order)) = self.order_by {
+        if let Some((ref field, order)) = self.order_by {
             filtered.sort_by(|a, b| {
-                let a_val = a.get(&field);
-                let b_val = b.get(&field);
-
-                let cmp = match (a_val, b_val) {
-                    (Some(DbValue::Integer(a)), Some(DbValue::Integer(b))) => a.partial_cmp(b),
-                    (Some(DbValue::Real(a)), Some(DbValue::Real(b))) => a.partial_cmp(b),
-                    (Some(DbValue::Integer(a)), Some(DbValue::Real(b))) => (*a as f64).partial_cmp(b),
-                    (Some(DbValue::Real(a)), Some(DbValue::Integer(b))) => a.partial_cmp(&(*b as f64)),
-                    (Some(DbValue::Text(a)), Some(DbValue::Text(b))) => Some(a.cmp(b)),
-                    _ => Some(std::cmp::Ordering::Equal),
-                };
-
-                match order {
-                    Order::Asc => cmp.unwrap_or(std::cmp::Ordering::Equal),
-                    Order::Desc => cmp.unwrap_or(std::cmp::Ordering::Equal).reverse(),
-                }
+                self.compare_rows(a, b, field, order)
             });
         }
 

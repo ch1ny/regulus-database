@@ -95,6 +95,24 @@ impl Database {
         tx.commit()?;
         Ok(result)
     }
+
+    /// 为表列创建索引
+    pub fn create_index(&self, table: &str, column: &str) -> DbResult<()> {
+        let mut engine = self.engine.write().unwrap();
+        engine.create_index(table, column)
+    }
+
+    /// 删除索引
+    pub fn drop_index(&self, table: &str, column: &str) -> DbResult<bool> {
+        let mut engine = self.engine.write().unwrap();
+        engine.drop_index(table, column)
+    }
+
+    /// 检查列是否有索引
+    pub fn has_index(&self, table: &str, column: &str) -> bool {
+        let engine = self.engine.read().unwrap();
+        engine.has_index(table, column)
+    }
 }
 
 impl Default for Database {

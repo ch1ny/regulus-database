@@ -1,4 +1,5 @@
 use std::fmt;
+use std::cmp::Ordering;
 
 /// 数据库值类型 - 支持 8 种基本类型
 #[derive(Debug, Clone, PartialEq)]
@@ -13,7 +14,54 @@ pub enum DbValue {
     Datetime(i64),  // Unix 时间戳（毫秒）
 }
 
+impl PartialOrd for DbValue {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for DbValue {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // 首先按类型排序
+        let self_type_order = self.type_order();
+        let other_type_order = other.type_order();
+
+        match self_type_order.cmp(&other_type_order) {
+            Ordering::Equal => {
+                // 同类型之间比较
+                match (self, other) {
+                    (DbValue::Null, DbValue::Null) => Ordering::Equal,
+                    (DbValue::Integer(a), DbValue::Integer(b)) => a.cmp(b),
+                    (DbValue::Real(a), DbValue::Real(b)) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
+                    (DbValue::Text(a), DbValue::Text(b)) => a.cmp(b),
+                    (DbValue::Blob(a), DbValue::Blob(b)) => a.cmp(b),
+                    (DbValue::Boolean(a), DbValue::Boolean(b)) => a.cmp(b),
+                    (DbValue::Date(a), DbValue::Date(b)) => a.cmp(b),
+                    (DbValue::Datetime(a), DbValue::Datetime(b)) => a.cmp(b),
+                    _ => Ordering::Equal,
+                }
+            }
+            other_order => other_order,
+        }
+    }
+}
+
+impl Eq for DbValue {}
+
 impl DbValue {
+    /// 返回类型的顺序（用于 Ord 实现）
+    fn type_order(&self) -> u8 {
+        match self {
+            DbValue::Null => 0,
+            DbValue::Integer(_) => 1,
+            DbValue::Real(_) => 2,
+            DbValue::Text(_) => 3,
+            DbValue::Blob(_) => 4,
+            DbValue::Boolean(_) => 5,
+            DbValue::Date(_) => 6,
+            DbValue::Datetime(_) => 7,
+        }
+    }
     // 构造函数
     pub fn null() -> Self {
         DbValue::Null
