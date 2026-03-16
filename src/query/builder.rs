@@ -302,6 +302,17 @@ impl QueryBuilder {
         left_val == right_val
     }
 
+    /// 从 qualified field name 提取列名
+    /// "table.column" -> "column"
+    /// "column" -> "column"
+    fn extract_column_name(field: &str) -> &str {
+        if let Some(pos) = field.rfind('.') {
+            &field[pos + 1..]
+        } else {
+            field
+        }
+    }
+
     /// 执行 JOIN 查询（嵌套循环连接）
     fn execute_join(&self, engine: &MemoryEngine) -> DbResult<Vec<Row>> {
         if self.joins.is_empty() {
@@ -370,6 +381,27 @@ impl QueryBuilder {
         }
 
         let join = &self.joins[join_index];
+
+        // 尝试使用索引优化
+        let right_column = Self::extract_column_name(&join.right_field);
+        if let Some(index) = engine.get_index(&join.right_table, right_column) {
+            // 有索引，使用索引优化
+            self.process_join_with_index_impl(engine, current_row, join_index, results, join, right_column, index)
+        } else {
+            // 无索引，降级为全表扫描
+            self.process_join_scan_impl(engine, current_row, join_index, results, join)
+        }
+    }
+
+    /// 使用全表扫描执行 JOIN（降级方案）
+    fn process_join_scan_impl(
+        &self,
+        engine: &MemoryEngine,
+        current_row: Row,
+        join_index: usize,
+        results: &mut Vec<Row>,
+        join: &JoinCondition,
+    ) -> DbResult<()> {
         let right_rows = engine.scan(&join.right_table)?;
 
         let mut has_match = false;
@@ -399,9 +431,52 @@ impl QueryBuilder {
             self.process_joins(engine, merged, join_index + 1, results)?;
         }
 
-        // RIGHT JOIN 处理：需要单独处理右表有但左表无匹配的行
-        // 注意：RIGHT JOIN 的完整实现需要更复杂的逻辑，这里简化处理
-        // 暂时不在此处处理 RIGHT JOIN，因为需要访问主表数据
+        Ok(())
+    }
+
+    /// 使用索引执行 JOIN（优化方案）
+    fn process_join_with_index_impl(
+        &self,
+        engine: &MemoryEngine,
+        current_row: Row,
+        join_index: usize,
+        results: &mut Vec<Row>,
+        join: &JoinCondition,
+        _right_column: &str,
+        index: &BTreeIndex,
+    ) -> DbResult<()> {
+        // 从左表获取 JOIN 字段值
+        let join_value = match current_row.get(&join.left_field) {
+            Some(v) => v,
+            None => return Ok(()),  // 左表字段为 NULL，无法匹配
+        };
+
+        // 使用索引查找匹配的 RowId（O(log n)）
+        let matching_row_ids = index.search(join_value);
+
+        let mut has_match = false;
+
+        for row_id in matching_row_ids {
+            has_match = true;
+            if let Some(right_row) = engine.get(&join.right_table, row_id)? {
+                let right_prefixed = self.prefix_row(right_row, &join.right_table);
+                let mut merged = current_row.clone();
+                merged.extend(right_prefixed);
+
+                // 递归处理下一个 JOIN
+                self.process_joins(engine, merged, join_index + 1, results)?;
+            }
+        }
+
+        // LEFT JOIN 无匹配处理
+        if !has_match && matches!(join.join_type, JoinType::Left) {
+            let null_row = self.create_null_row(engine, &join.right_table)?;
+            let mut merged = current_row.clone();
+            merged.extend(null_row);
+
+            // 递归处理下一个 JOIN
+            self.process_joins(engine, merged, join_index + 1, results)?;
+        }
 
         Ok(())
     }

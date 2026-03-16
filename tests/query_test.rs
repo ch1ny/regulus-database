@@ -207,3 +207,216 @@ fn test_text_search() {
         .unwrap();
     assert_eq!(results.len(), 1);
 }
+
+/// 测试索引优化的 JOIN
+#[test]
+fn test_join_with_index() {
+    let db = Database::new();
+
+    // 创建用户表
+    db.create_table("users", vec![
+        Column::new("id", DataType::integer()),
+        Column::new("name", DataType::text()),
+        Column::new("email", DataType::text()),
+    ]).unwrap();
+
+    // 创建订单表
+    db.create_table("orders", vec![
+        Column::new("id", DataType::integer()),
+        Column::new("user_id", DataType::integer()),
+        Column::new("product", DataType::text()),
+        Column::new("amount", DataType::integer()),
+    ]).unwrap();
+
+    // 为 orders.user_id 创建索引
+    db.create_index("orders", "user_id").unwrap();
+
+    // 插入用户数据
+    db.insert("users", vec![
+        ("id", DbValue::integer(1)),
+        ("name", DbValue::text("Alice")),
+        ("email", DbValue::text("alice@example.com")),
+    ]).unwrap();
+
+    db.insert("users", vec![
+        ("id", DbValue::integer(2)),
+        ("name", DbValue::text("Bob")),
+        ("email", DbValue::text("bob@example.com")),
+    ]).unwrap();
+
+    db.insert("users", vec![
+        ("id", DbValue::integer(3)),
+        ("name", DbValue::text("Charlie")),
+        ("email", DbValue::text("charlie@example.com")),
+    ]).unwrap();
+
+    // 插入订单数据
+    db.insert("orders", vec![
+        ("id", DbValue::integer(1)),
+        ("user_id", DbValue::integer(1)),
+        ("product", DbValue::text("Book")),
+        ("amount", DbValue::integer(100)),
+    ]).unwrap();
+
+    db.insert("orders", vec![
+        ("id", DbValue::integer(2)),
+        ("user_id", DbValue::integer(1)),
+        ("product", DbValue::text("Pen")),
+        ("amount", DbValue::integer(10)),
+    ]).unwrap();
+
+    db.insert("orders", vec![
+        ("id", DbValue::integer(3)),
+        ("user_id", DbValue::integer(2)),
+        ("product", DbValue::text("Notebook")),
+        ("amount", DbValue::integer(50)),
+    ]).unwrap();
+
+    // INNER JOIN 测试
+    let results = db.query("users")
+        .inner_join("orders", "users.id", "orders.user_id")
+        .select(&["users.name", "orders.product", "orders.amount"])
+        .execute()
+        .unwrap();
+
+    // Alice 有 2 个订单，Bob 有 1 个订单，Charlie 没有订单
+    assert_eq!(results.len(), 3);
+
+    // LEFT JOIN 测试 - 应该返回所有用户（包括没有订单的 Charlie）
+    let results = db.query("users")
+        .left_join("orders", "users.id", "orders.user_id")
+        .select(&["users.name", "orders.product"])
+        .execute()
+        .unwrap();
+
+    // Alice 2 条 + Bob 1 条 + Charlie 1 条（NULL）= 4 条
+    assert_eq!(results.len(), 4);
+
+    // 验证 Charlie 的订单为 NULL
+    let charlie_rows: Vec<_> = results.iter()
+        .filter(|row| row.get("users.name").unwrap().as_text() == Some("Charlie"))
+        .collect();
+    assert_eq!(charlie_rows.len(), 1);
+    assert!(charlie_rows[0].get("orders.product").unwrap().as_text().is_none());
+}
+
+/// 测试带有过滤条件的索引 JOIN
+#[test]
+fn test_join_with_index_and_filter() {
+    let db = Database::new();
+
+    // 创建表
+    db.create_table("users", vec![
+        Column::new("id", DataType::integer()),
+        Column::new("name", DataType::text()),
+    ]).unwrap();
+
+    db.create_table("orders", vec![
+        Column::new("id", DataType::integer()),
+        Column::new("user_id", DataType::integer()),
+        Column::new("product", DataType::text()),
+        Column::new("amount", DataType::integer()),
+    ]).unwrap();
+
+    // 为 orders.user_id 创建索引
+    db.create_index("orders", "user_id").unwrap();
+
+    // 插入数据
+    db.insert("users", vec![
+        ("id", DbValue::integer(1)),
+        ("name", DbValue::text("Alice")),
+    ]).unwrap();
+
+    db.insert("users", vec![
+        ("id", DbValue::integer(2)),
+        ("name", DbValue::text("Bob")),
+    ]).unwrap();
+
+    db.insert("orders", vec![
+        ("id", DbValue::integer(1)),
+        ("user_id", DbValue::integer(1)),
+        ("product", DbValue::text("Book")),
+        ("amount", DbValue::integer(100)),
+    ]).unwrap();
+
+    db.insert("orders", vec![
+        ("id", DbValue::integer(2)),
+        ("user_id", DbValue::integer(1)),
+        ("product", DbValue::text("Pen")),
+        ("amount", DbValue::integer(10)),
+    ]).unwrap();
+
+    db.insert("orders", vec![
+        ("id", DbValue::integer(3)),
+        ("user_id", DbValue::integer(2)),
+        ("product", DbValue::text("Notebook")),
+        ("amount", DbValue::integer(50)),
+    ]).unwrap();
+
+    // JOIN + 过滤：订单金额大于 50
+    let results = db.query("users")
+        .inner_join("orders", "users.id", "orders.user_id")
+        .select(&["users.name", "orders.product", "orders.amount"])
+        .gt("orders.amount", DbValue::integer(50))
+        .execute()
+        .unwrap();
+
+    // 只有 Alice 的 Book 订单（$100）符合条件
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].get("users.name").unwrap().as_text(), Some("Alice"));
+    assert_eq!(results[0].get("orders.product").unwrap().as_text(), Some("Book"));
+}
+
+/// 测试带有排序和分页的索引 JOIN
+#[test]
+fn test_join_with_index_order_and_pagination() {
+    let db = Database::new();
+
+    // 创建表
+    db.create_table("users", vec![
+        Column::new("id", DataType::integer()),
+        Column::new("name", DataType::text()),
+    ]).unwrap();
+
+    db.create_table("orders", vec![
+        Column::new("id", DataType::integer()),
+        Column::new("user_id", DataType::integer()),
+        Column::new("product", DataType::text()),
+        Column::new("amount", DataType::integer()),
+    ]).unwrap();
+
+    // 为 orders.user_id 创建索引
+    db.create_index("orders", "user_id").unwrap();
+
+    // 插入数据
+    for i in 1..=5 {
+        db.insert("users", vec![
+            ("id", DbValue::integer(i)),
+            ("name", DbValue::text(format!("User{}", i))),
+        ]).unwrap();
+
+        db.insert("orders", vec![
+            ("id", DbValue::integer(i)),
+            ("user_id", DbValue::integer(i)),
+            ("product", DbValue::text(format!("Product{}", i))),
+            ("amount", DbValue::integer(i * 100)),
+        ]).unwrap();
+    }
+
+    // JOIN + 排序 + 分页
+    let results = db.query("users")
+        .inner_join("orders", "users.id", "orders.user_id")
+        .select(&["users.name", "orders.amount"])
+        .order_by("orders.amount", Order::Desc)
+        .limit(2)
+        .offset(1)
+        .execute()
+        .unwrap();
+
+    // 总共 5 条，每页 2 条，第 2 页应该有 2 条（第 2 和第 3 大的金额）
+    assert_eq!(results.len(), 2);
+    // 第 2 大的金额应该是 400（User4）
+    assert_eq!(results[0].get("orders.amount").unwrap().as_integer(), Some(400));
+    // 第 3 大的金额应该是 300（User3）
+    assert_eq!(results[1].get("orders.amount").unwrap().as_integer(), Some(300));
+}

@@ -14,3 +14,7 @@ criterion = "0.5"
 [[bench]]
 name = "benchmarks"
 harness = false
+
+[[bench]]
+name = "join_benchmark"
+harness = false
