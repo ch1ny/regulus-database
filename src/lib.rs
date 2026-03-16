@@ -6,7 +6,7 @@ pub mod transaction;
 
 pub use types::{DbValue, DataType, Column, TableSchema, DbError, DbResult};
 pub use storage::{MemoryEngine, StorageEngine, Row, RowId};
-pub use query::{QueryBuilder, UpdateBuilder, DeleteBuilder, Order};
+pub use query::{QueryBuilder, UpdateBuilder, DeleteBuilder, Order, JoinType};
 pub use transaction::Transaction;
 
 use std::sync::{Arc, RwLock};
@@ -527,5 +527,249 @@ mod tests {
         });
 
         assert_eq!(result.unwrap(), 1);
+    }
+
+    // ========== JOIN 测试 ==========
+
+    #[test]
+    fn test_inner_join() {
+        let db = Database::new();
+
+        // 创建用户表
+        db.create_table("users", vec![
+            Column::new("id", DataType::integer()),
+            Column::new("name", DataType::text()),
+        ]).unwrap();
+
+        // 创建订单表
+        db.create_table("orders", vec![
+            Column::new("id", DataType::integer()),
+            Column::new("user_id", DataType::integer()),
+            Column::new("product", DataType::text()),
+            Column::new("amount", DataType::integer()),
+        ]).unwrap();
+
+        // 插入用户数据
+        db.insert("users", vec![("id", DbValue::integer(1)), ("name", DbValue::text("Alice"))]).unwrap();
+        db.insert("users", vec![("id", DbValue::integer(2)), ("name", DbValue::text("Bob"))]).unwrap();
+        db.insert("users", vec![("id", DbValue::integer(3)), ("name", DbValue::text("Charlie"))]).unwrap();
+
+        // 插入订单数据
+        db.insert("orders", vec![("id", DbValue::integer(1)), ("user_id", DbValue::integer(1)), ("product", DbValue::text("Book")), ("amount", DbValue::integer(100))]).unwrap();
+        db.insert("orders", vec![("id", DbValue::integer(2)), ("user_id", DbValue::integer(1)), ("product", DbValue::text("Pen")), ("amount", DbValue::integer(10))]).unwrap();
+        db.insert("orders", vec![("id", DbValue::integer(3)), ("user_id", DbValue::integer(2)), ("product", DbValue::text("Notebook")), ("amount", DbValue::integer(50))]).unwrap();
+
+        // INNER JOIN：只返回有订单的用户
+        let results = db.query("users")
+            .inner_join("orders", "users.id", "orders.user_id")
+            .execute()
+            .unwrap();
+
+        // 应该有 3 条结果（Alice 有 2 个订单，Bob 有 1 个订单）
+        assert_eq!(results.len(), 3);
+
+        // 验证字段名前缀
+        let first_row = &results[0];
+        assert!(first_row.contains_key("users.id"));
+        assert!(first_row.contains_key("users.name"));
+        assert!(first_row.contains_key("orders.id"));
+        assert!(first_row.contains_key("orders.user_id"));
+    }
+
+    #[test]
+    fn test_left_join() {
+        let db = Database::new();
+
+        // 创建用户表
+        db.create_table("users", vec![
+            Column::new("id", DataType::integer()),
+            Column::new("name", DataType::text()),
+        ]).unwrap();
+
+        // 创建订单表
+        db.create_table("orders", vec![
+            Column::new("id", DataType::integer()),
+            Column::new("user_id", DataType::integer()),
+            Column::new("product", DataType::text()),
+        ]).unwrap();
+
+        // 插入用户数据
+        db.insert("users", vec![("id", DbValue::integer(1)), ("name", DbValue::text("Alice"))]).unwrap();
+        db.insert("users", vec![("id", DbValue::integer(2)), ("name", DbValue::text("Bob"))]).unwrap();
+        db.insert("users", vec![("id", DbValue::integer(3)), ("name", DbValue::text("Charlie"))]).unwrap();
+
+        // 插入订单数据（只有 Alice 有订单）
+        db.insert("orders", vec![("id", DbValue::integer(1)), ("user_id", DbValue::integer(1)), ("product", DbValue::text("Book"))]).unwrap();
+
+        // LEFT JOIN：返回所有用户，即使没有订单
+        let results = db.query("users")
+            .left_join("orders", "users.id", "orders.user_id")
+            .execute()
+            .unwrap();
+
+        // 应该有 3 条结果（所有用户）
+        assert_eq!(results.len(), 3);
+
+        // Alice 的订单应该有数据
+        let alice_orders: Vec<_> = results.iter()
+            .filter(|r| r.get("users.name").unwrap().as_text() == Some("Alice"))
+            .collect();
+        assert_eq!(alice_orders.len(), 1);
+        assert!(alice_orders[0].get("orders.id").unwrap().as_integer().is_some());
+
+        // Bob 没有订单，orders.id 应该为 NULL
+        let bob_rows: Vec<_> = results.iter()
+            .filter(|r| r.get("users.name").unwrap().as_text() == Some("Bob"))
+            .collect();
+        assert_eq!(bob_rows.len(), 1);
+        assert!(bob_rows[0].get("orders.id").unwrap().is_null());
+    }
+
+    #[test]
+    fn test_join_with_select() {
+        let db = Database::new();
+
+        // 创建用户表
+        db.create_table("users", vec![
+            Column::new("id", DataType::integer()),
+            Column::new("name", DataType::text()),
+        ]).unwrap();
+
+        // 创建订单表
+        db.create_table("orders", vec![
+            Column::new("id", DataType::integer()),
+            Column::new("user_id", DataType::integer()),
+            Column::new("product", DataType::text()),
+            Column::new("amount", DataType::integer()),
+        ]).unwrap();
+
+        // 插入数据
+        db.insert("users", vec![("id", DbValue::integer(1)), ("name", DbValue::text("Alice"))]).unwrap();
+        db.insert("orders", vec![("id", DbValue::integer(1)), ("user_id", DbValue::integer(1)), ("product", DbValue::text("Book")), ("amount", DbValue::integer(100))]).unwrap();
+
+        // 使用 select 选择特定字段
+        let results = db.query("users")
+            .inner_join("orders", "users.id", "orders.user_id")
+            .select(&["users.name", "orders.product", "orders.amount"])
+            .execute()
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].contains_key("users.name"));
+        assert!(results[0].contains_key("orders.product"));
+        assert!(results[0].contains_key("orders.amount"));
+        assert_eq!(results[0].get("users.name").unwrap().as_text(), Some("Alice"));
+        assert_eq!(results[0].get("orders.product").unwrap().as_text(), Some("Book"));
+        assert_eq!(results[0].get("orders.amount").unwrap().as_integer(), Some(100));
+    }
+
+    #[test]
+    fn test_join_with_filter() {
+        let db = Database::new();
+
+        // 创建用户表
+        db.create_table("users", vec![
+            Column::new("id", DataType::integer()),
+            Column::new("name", DataType::text()),
+        ]).unwrap();
+
+        // 创建订单表
+        db.create_table("orders", vec![
+            Column::new("id", DataType::integer()),
+            Column::new("user_id", DataType::integer()),
+            Column::new("amount", DataType::integer()),
+        ]).unwrap();
+
+        // 插入数据
+        db.insert("users", vec![("id", DbValue::integer(1)), ("name", DbValue::text("Alice"))]).unwrap();
+        db.insert("users", vec![("id", DbValue::integer(2)), ("name", DbValue::text("Bob"))]).unwrap();
+        db.insert("orders", vec![("id", DbValue::integer(1)), ("user_id", DbValue::integer(1)), ("amount", DbValue::integer(100))]).unwrap();
+        db.insert("orders", vec![("id", DbValue::integer(2)), ("user_id", DbValue::integer(1)), ("amount", DbValue::integer(200))]).unwrap();
+        db.insert("orders", vec![("id", DbValue::integer(3)), ("user_id", DbValue::integer(2)), ("amount", DbValue::integer(50))]).unwrap();
+
+        // JOIN 后应用过滤条件
+        let results = db.query("users")
+            .inner_join("orders", "users.id", "orders.user_id")
+            .gt("orders.amount", DbValue::integer(90))
+            .execute()
+            .unwrap();
+
+        // 应该有 2 条结果（amount > 90 的订单）
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_join_with_order_by() {
+        let db = Database::new();
+
+        // 创建用户表
+        db.create_table("users", vec![
+            Column::new("id", DataType::integer()),
+            Column::new("name", DataType::text()),
+        ]).unwrap();
+
+        // 创建订单表
+        db.create_table("orders", vec![
+            Column::new("id", DataType::integer()),
+            Column::new("user_id", DataType::integer()),
+            Column::new("amount", DataType::integer()),
+        ]).unwrap();
+
+        // 插入数据
+        db.insert("users", vec![("id", DbValue::integer(1)), ("name", DbValue::text("Alice"))]).unwrap();
+        db.insert("orders", vec![("id", DbValue::integer(1)), ("user_id", DbValue::integer(1)), ("amount", DbValue::integer(100))]).unwrap();
+        db.insert("orders", vec![("id", DbValue::integer(2)), ("user_id", DbValue::integer(1)), ("amount", DbValue::integer(200))]).unwrap();
+        db.insert("orders", vec![("id", DbValue::integer(3)), ("user_id", DbValue::integer(1)), ("amount", DbValue::integer(50))]).unwrap();
+
+        // JOIN 后排序
+        let results = db.query("users")
+            .inner_join("orders", "users.id", "orders.user_id")
+            .order_by("orders.amount", Order::Desc)
+            .execute()
+            .unwrap();
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].get("orders.amount").unwrap().as_integer(), Some(200));
+        assert_eq!(results[2].get("orders.amount").unwrap().as_integer(), Some(50));
+    }
+
+    #[test]
+    fn test_join_with_limit_offset() {
+        let db = Database::new();
+
+        // 创建用户表
+        db.create_table("users", vec![
+            Column::new("id", DataType::integer()),
+            Column::new("name", DataType::text()),
+        ]).unwrap();
+
+        // 创建订单表
+        db.create_table("orders", vec![
+            Column::new("id", DataType::integer()),
+            Column::new("user_id", DataType::integer()),
+            Column::new("amount", DataType::integer()),
+        ]).unwrap();
+
+        // 插入数据
+        db.insert("users", vec![("id", DbValue::integer(1)), ("name", DbValue::text("Alice"))]).unwrap();
+        for i in 0..10 {
+            db.insert("orders", vec![
+                ("id", DbValue::integer(i)),
+                ("user_id", DbValue::integer(1)),
+                ("amount", DbValue::integer((i + 1) * 10)),
+            ]).unwrap();
+        }
+
+        // JOIN 后分页
+        let results = db.query("users")
+            .inner_join("orders", "users.id", "orders.user_id")
+            .order_by("orders.amount", Order::Asc)
+            .limit(5)
+            .offset(2)
+            .execute()
+            .unwrap();
+
+        assert_eq!(results.len(), 5);
+        assert_eq!(results[0].get("orders.amount").unwrap().as_integer(), Some(30));
     }
 }
