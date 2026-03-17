@@ -1,5 +1,6 @@
 use std::fmt;
 use std::cmp::Ordering;
+use std::hash::{Hash, Hasher};
 
 /// 数据库值类型 - 支持 8 种基本类型
 #[derive(Debug, Clone, PartialEq)]
@@ -12,6 +13,33 @@ pub enum DbValue {
     Boolean(bool),
     Date(i64),      // Unix 时间戳（天）
     Datetime(i64),  // Unix 时间戳（毫秒）
+}
+
+impl Hash for DbValue {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // 先哈希类型标签
+        match self {
+            DbValue::Null => 0u8.hash(state),
+            DbValue::Integer(_) => 1u8.hash(state),
+            DbValue::Real(_) => 2u8.hash(state),
+            DbValue::Text(_) => 3u8.hash(state),
+            DbValue::Blob(_) => 4u8.hash(state),
+            DbValue::Boolean(_) => 5u8.hash(state),
+            DbValue::Date(_) => 6u8.hash(state),
+            DbValue::Datetime(_) => 7u8.hash(state),
+        }
+        // 再哈希具体值
+        match self {
+            DbValue::Null => {}
+            DbValue::Integer(v) => v.hash(state),
+            DbValue::Real(v) => v.to_bits().hash(state),
+            DbValue::Text(v) => v.hash(state),
+            DbValue::Blob(v) => v.hash(state),
+            DbValue::Boolean(v) => v.hash(state),
+            DbValue::Date(v) => v.hash(state),
+            DbValue::Datetime(v) => v.hash(state),
+        }
+    }
 }
 
 impl PartialOrd for DbValue {

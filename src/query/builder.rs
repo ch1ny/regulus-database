@@ -44,6 +44,35 @@ pub enum FilterExpr {
     Not(Box<FilterExpr>),
 }
 
+/// 聚合函数类型
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AggregateFunction {
+    Count,
+    Sum,
+    Avg,
+    Max,
+    Min,
+}
+
+/// 聚合表达式
+#[derive(Debug, Clone)]
+pub struct AggregateExpr {
+    pub func: AggregateFunction,
+    pub column: Option<String>,  // COUNT(*) 为 None
+    pub alias: Option<String>,   // 可选的别名
+}
+
+/// HAVING 子句表达式（用于过滤分组）
+#[derive(Debug, Clone)]
+pub enum HavingExpr {
+    Eq { value: DbValue },
+    Ne { value: DbValue },
+    Lt { value: DbValue },
+    Le { value: DbValue },
+    Gt { value: DbValue },
+    Ge { value: DbValue },
+}
+
 /// 评估过滤表达式
 fn evaluate_filter(expr: &FilterExpr, row: &Row) -> bool {
     match expr {
@@ -113,6 +142,10 @@ pub struct QueryBuilder {
     limit: Option<usize>,
     offset: Option<usize>,
     engine: Arc<RwLock<MemoryEngine>>,
+    // 聚合函数相关
+    aggregate: Option<AggregateExpr>,    // 聚合函数
+    group_by: Vec<String>,               // GROUP BY 字段
+    having: Option<HavingExpr>,          // HAVING 子句
 }
 
 impl QueryBuilder {
@@ -126,6 +159,9 @@ impl QueryBuilder {
             limit: None,
             offset: None,
             engine,
+            aggregate: None,
+            group_by: Vec::new(),
+            having: None,
         }
     }
 
@@ -785,9 +821,128 @@ impl QueryBuilder {
         self
     }
 
+    // ==================== 聚合函数方法 ====================
+
+    /// COUNT(*) - 统计行数
+    pub fn count(mut self) -> Self {
+        self.aggregate = Some(AggregateExpr {
+            func: AggregateFunction::Count,
+            column: None,  // COUNT(*) 不需要列名
+            alias: None,
+        });
+        self
+    }
+
+    /// COUNT(column) - 统计非 NULL 行数
+    pub fn count_column(mut self, column: &str) -> Self {
+        self.aggregate = Some(AggregateExpr {
+            func: AggregateFunction::Count,
+            column: Some(column.to_string()),
+            alias: None,
+        });
+        self
+    }
+
+    /// SUM(column) - 求和
+    pub fn sum(mut self, column: &str) -> Self {
+        self.aggregate = Some(AggregateExpr {
+            func: AggregateFunction::Sum,
+            column: Some(column.to_string()),
+            alias: None,
+        });
+        self
+    }
+
+    /// AVG(column) - 平均值
+    pub fn avg(mut self, column: &str) -> Self {
+        self.aggregate = Some(AggregateExpr {
+            func: AggregateFunction::Avg,
+            column: Some(column.to_string()),
+            alias: None,
+        });
+        self
+    }
+
+    /// MAX(column) - 最大值
+    pub fn max(mut self, column: &str) -> Self {
+        self.aggregate = Some(AggregateExpr {
+            func: AggregateFunction::Max,
+            column: Some(column.to_string()),
+            alias: None,
+        });
+        self
+    }
+
+    /// MIN(column) - 最小值
+    pub fn min(mut self, column: &str) -> Self {
+        self.aggregate = Some(AggregateExpr {
+            func: AggregateFunction::Min,
+            column: Some(column.to_string()),
+            alias: None,
+        });
+        self
+    }
+
+    /// 设置聚合结果别名
+    pub fn alias(mut self, name: &str) -> Self {
+        if let Some(ref mut agg) = self.aggregate {
+            agg.alias = Some(name.to_string());
+        }
+        self
+    }
+
+    // ==================== GROUP BY 和 HAVING ====================
+
+    /// GROUP BY 子句
+    pub fn group_by(mut self, columns: &[&str]) -> Self {
+        self.group_by = columns.iter().map(|s| s.to_string()).collect();
+        self
+    }
+
+    /// HAVING 子句 - 等于
+    pub fn having_eq(mut self, value: DbValue) -> Self {
+        self.having = Some(HavingExpr::Eq { value });
+        self
+    }
+
+    /// HAVING 子句 - 不等于
+    pub fn having_ne(mut self, value: DbValue) -> Self {
+        self.having = Some(HavingExpr::Ne { value });
+        self
+    }
+
+    /// HAVING 子句 - 大于
+    pub fn having_gt(mut self, value: DbValue) -> Self {
+        self.having = Some(HavingExpr::Gt { value });
+        self
+    }
+
+    /// HAVING 子句 - 大于等于
+    pub fn having_ge(mut self, value: DbValue) -> Self {
+        self.having = Some(HavingExpr::Ge { value });
+        self
+    }
+
+    /// HAVING 子句 - 小于
+    pub fn having_lt(mut self, value: DbValue) -> Self {
+        self.having = Some(HavingExpr::Lt { value });
+        self
+    }
+
+    /// HAVING 子句 - 小于等于
+    pub fn having_le(mut self, value: DbValue) -> Self {
+        self.having = Some(HavingExpr::Le { value });
+        self
+    }
+
     /// 执行查询
     pub fn execute(self) -> DbResult<Vec<Row>> {
         let engine = self.engine.read().unwrap();
+
+        // 检查是否有聚合函数
+        if self.aggregate.is_some() || !self.group_by.is_empty() {
+            return self.execute_aggregate(&engine);
+        }
 
         // 检查是否有 JOIN
         if !self.joins.is_empty() {
@@ -824,6 +979,394 @@ impl QueryBuilder {
         let end = start + self.limit.unwrap_or(filtered.len());
 
         Ok(filtered.into_iter().skip(start).take(end - start).collect())
+    }
+
+    /// 执行聚合查询
+    fn execute_aggregate(&self, engine: &MemoryEngine) -> DbResult<Vec<Row>> {
+        // 获取数据（考虑 JOIN 和过滤）
+        let rows: Vec<Row> = if !self.joins.is_empty() {
+            // 有 JOIN 时，先执行 JOIN
+            let join_rows = self.execute_join(engine)?;
+            // 应用过滤条件
+            join_rows.into_iter()
+                .filter(|row| self.filters.iter().all(|expr| evaluate_filter(expr, row)))
+                .collect()
+        } else {
+            // 无 JOIN 时，直接扫描并过滤
+            let scanned = engine.scan(&self.table)?;
+            scanned.into_iter()
+                .filter(|(_, row)| self.filters.iter().all(|expr| evaluate_filter(expr, row)))
+                .map(|(_, row)| row.clone())
+                .collect()
+        };
+
+        // 处理 GROUP BY
+        if !self.group_by.is_empty() {
+            self.execute_grouped_aggregate(rows)
+        } else {
+            // 无 GROUP BY，全局聚合
+            self.execute_simple_aggregate(rows)
+        }
+    }
+
+    /// 执行简单聚合（无 GROUP BY）
+    fn execute_simple_aggregate(&self, rows: Vec<Row>) -> DbResult<Vec<Row>> {
+        let agg = match &self.aggregate {
+            Some(a) => a,
+            None => {
+                // 没有聚合函数，返回原始数据（不应该发生）
+                return Ok(rows);
+            }
+        };
+
+        let result_value = match agg.func {
+            AggregateFunction::Count => {
+                let count = match &agg.column {
+                    Some(col) => {
+                        // COUNT(column) - 统计非 NULL 值
+                        rows.iter()
+                            .filter(|r| r.get(col).map(|v| !v.is_null()).unwrap_or(false))
+                            .count() as i64
+                    }
+                    None => {
+                        // COUNT(*) - 统计所有行
+                        rows.len() as i64
+                    }
+                };
+                DbValue::Integer(count)
+            }
+            AggregateFunction::Sum => {
+                match &agg.column {
+                    Some(col) => self.sum_column(&rows, col),
+                    None => DbValue::Integer(0),
+                }
+            }
+            AggregateFunction::Avg => {
+                match &agg.column {
+                    Some(col) => self.avg_column(&rows, col),
+                    None => DbValue::Null,
+                }
+            }
+            AggregateFunction::Max => {
+                match &agg.column {
+                    Some(col) => self.max_column(&rows, col),
+                    None => DbValue::Null,
+                }
+            }
+            AggregateFunction::Min => {
+                match &agg.column {
+                    Some(col) => self.min_column(&rows, col),
+                    None => DbValue::Null,
+                }
+            }
+        };
+
+        // 构建结果行
+        let mut result_row = Row::new();
+        let column_name = match &agg.alias {
+            Some(alias) => alias.clone(),
+            None => {
+                let func_name = match agg.func {
+                    AggregateFunction::Count => "COUNT",
+                    AggregateFunction::Sum => "SUM",
+                    AggregateFunction::Avg => "AVG",
+                    AggregateFunction::Max => "MAX",
+                    AggregateFunction::Min => "MIN",
+                };
+                match &agg.column {
+                    Some(col) => format!("{}({})", func_name, col),
+                    None => "COUNT(*)".to_string(),
+                }
+            }
+        };
+
+        // 将 i64 转换为 DbValue
+        let db_value = match result_value {
+            DbValue::Integer(i) => DbValue::Integer(i),
+            DbValue::Real(r) => DbValue::Real(r),
+            DbValue::Null => DbValue::Null,
+            _ => DbValue::Null,
+        };
+        result_row.insert(column_name, db_value);
+
+        Ok(vec![result_row])
+    }
+
+    /// 执行分组聚合（有 GROUP BY）
+    fn execute_grouped_aggregate(&self, rows: Vec<Row>) -> DbResult<Vec<Row>> {
+        let agg = match &self.aggregate {
+            Some(a) => a,
+            None => {
+                // 没有聚合函数，只返回 GROUP BY 列的不同组合
+                return self.execute_group_by_only(rows);
+            }
+        };
+
+        // 按 GROUP BY 列分组
+        use std::collections::HashMap;
+        let mut groups: HashMap<Vec<DbValue>, Vec<Row>> = HashMap::new();
+
+        for row in rows {
+            // 构建分组键
+            let mut key = Vec::new();
+            for col in &self.group_by {
+                if let Some(val) = row.get(col) {
+                    key.push(val.clone());
+                } else {
+                    key.push(DbValue::Null);
+                }
+            }
+
+            groups.entry(key).or_insert_with(Vec::new).push(row);
+        }
+
+        // 对每组计算聚合函数
+        let mut results = Vec::new();
+        for (key, group_rows) in groups {
+            // 计算聚合值
+            let agg_value = match agg.func {
+                AggregateFunction::Count => {
+                    let count = match &agg.column {
+                        Some(col) => {
+                            group_rows.iter()
+                                .filter(|r| r.get(col).map(|v| !v.is_null()).unwrap_or(false))
+                                .count() as i64
+                        }
+                        None => group_rows.len() as i64,
+                    };
+                    DbValue::Integer(count)
+                }
+                AggregateFunction::Sum => {
+                    match &agg.column {
+                        Some(col) => self.sum_column(&group_rows, col),
+                        None => DbValue::Integer(0),
+                    }
+                }
+                AggregateFunction::Avg => {
+                    match &agg.column {
+                        Some(col) => self.avg_column(&group_rows, col),
+                        None => DbValue::Null,
+                    }
+                }
+                AggregateFunction::Max => {
+                    match &agg.column {
+                        Some(col) => self.max_column(&group_rows, col),
+                        None => DbValue::Null,
+                    }
+                }
+                AggregateFunction::Min => {
+                    match &agg.column {
+                        Some(col) => self.min_column(&group_rows, col),
+                        None => DbValue::Null,
+                    }
+                }
+            };
+
+            // 应用 HAVING 过滤
+            if let Some(ref having) = self.having {
+                if !self.evaluate_having(&agg_value, having) {
+                    continue;
+                }
+            }
+
+            // 构建结果行
+            let mut result_row = Row::new();
+
+            // 添加 GROUP BY 列
+            for (i, col) in self.group_by.iter().enumerate() {
+                result_row.insert(col.clone(), key[i].clone());
+            }
+
+            // 添加聚合结果
+            let column_name = match &agg.alias {
+                Some(alias) => alias.clone(),
+                None => {
+                    let func_name = match agg.func {
+                        AggregateFunction::Count => "COUNT",
+                        AggregateFunction::Sum => "SUM",
+                        AggregateFunction::Avg => "AVG",
+                        AggregateFunction::Max => "MAX",
+                        AggregateFunction::Min => "MIN",
+                    };
+                    match &agg.column {
+                        Some(col) => format!("{}({})", func_name, col),
+                        None => "COUNT(*)".to_string(),
+                    }
+                }
+            };
+
+            let db_value = match agg_value {
+                DbValue::Integer(i) => DbValue::Integer(i),
+                DbValue::Real(r) => DbValue::Real(r),
+                DbValue::Null => DbValue::Null,
+                _ => DbValue::Null,
+            };
+            result_row.insert(column_name, db_value);
+
+            results.push(result_row);
+        }
+
+        Ok(results)
+    }
+
+    /// 仅执行 GROUP BY（没有聚合函数）
+    fn execute_group_by_only(&self, rows: Vec<Row>) -> DbResult<Vec<Row>> {
+        use std::collections::HashSet;
+
+        let mut seen: HashSet<Vec<DbValue>> = HashSet::new();
+        let mut results = Vec::new();
+
+        for row in rows {
+            let mut key = Vec::new();
+            for col in &self.group_by {
+                if let Some(val) = row.get(col) {
+                    key.push(val.clone());
+                } else {
+                    key.push(DbValue::Null);
+                }
+            }
+
+            if !seen.contains(&key) {
+                seen.insert(key.clone());
+
+                let mut result_row = Row::new();
+                for (i, col) in self.group_by.iter().enumerate() {
+                    result_row.insert(col.clone(), key[i].clone());
+                }
+                results.push(result_row);
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// 计算列的总和
+    fn sum_column(&self, rows: &[Row], column: &str) -> DbValue {
+        let mut sum: f64 = 0.0;
+        let mut has_value = false;
+
+        for row in rows {
+            if let Some(val) = row.get(column) {
+                match val {
+                    DbValue::Integer(i) => {
+                        sum += *i as f64;
+                        has_value = true;
+                    }
+                    DbValue::Real(r) => {
+                        sum += *r;
+                        has_value = true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if has_value {
+            // 如果所有值都是整数，返回整数
+            if rows.iter().filter_map(|r| r.get(column)).all(|v| matches!(v, DbValue::Integer(_))) {
+                DbValue::Integer(sum as i64)
+            } else {
+                DbValue::Real(sum)
+            }
+        } else {
+            DbValue::Null
+        }
+    }
+
+    /// 计算列的平均值
+    fn avg_column(&self, rows: &[Row], column: &str) -> DbValue {
+        let mut sum: f64 = 0.0;
+        let mut count: i64 = 0;
+
+        for row in rows {
+            if let Some(val) = row.get(column) {
+                match val {
+                    DbValue::Integer(i) => {
+                        sum += *i as f64;
+                        count += 1;
+                    }
+                    DbValue::Real(r) => {
+                        sum += *r;
+                        count += 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if count > 0 {
+            DbValue::Real(sum / count as f64)
+        } else {
+            DbValue::Null
+        }
+    }
+
+    /// 计算列的最大值
+    fn max_column(&self, rows: &[Row], column: &str) -> DbValue {
+        let mut max_val: Option<DbValue> = None;
+
+        for row in rows {
+            if let Some(val) = row.get(column) {
+                if !val.is_null() {
+                    match &max_val {
+                        None => max_val = Some(val.clone()),
+                        Some(current) => {
+                            if self.compare_values(val, current) > 0 {
+                                max_val = Some(val.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        max_val.unwrap_or(DbValue::Null)
+    }
+
+    /// 计算列的最小值
+    fn min_column(&self, rows: &[Row], column: &str) -> DbValue {
+        let mut min_val: Option<DbValue> = None;
+
+        for row in rows {
+            if let Some(val) = row.get(column) {
+                if !val.is_null() {
+                    match &min_val {
+                        None => min_val = Some(val.clone()),
+                        Some(current) => {
+                            if self.compare_values(val, current) < 0 {
+                                min_val = Some(val.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        min_val.unwrap_or(DbValue::Null)
+    }
+
+    /// 比较两个 DbValue
+    fn compare_values(&self, a: &DbValue, b: &DbValue) -> i32 {
+        match (a, b) {
+            (DbValue::Integer(a), DbValue::Integer(b)) => a.cmp(b) as i32,
+            (DbValue::Integer(a), DbValue::Real(b)) => (*a as f64).partial_cmp(b).map(|o| o as i32).unwrap_or(0),
+            (DbValue::Real(a), DbValue::Integer(b)) => a.partial_cmp(&(*b as f64)).map(|o| o as i32).unwrap_or(0),
+            (DbValue::Real(a), DbValue::Real(b)) => a.partial_cmp(b).map(|o| o as i32).unwrap_or(0),
+            (DbValue::Text(a), DbValue::Text(b)) => a.cmp(b) as i32,
+            _ => 0,
+        }
+    }
+
+    /// 评估 HAVING 子句
+    fn evaluate_having(&self, agg_value: &DbValue, having: &HavingExpr) -> bool {
+        match having {
+            HavingExpr::Eq { value } => agg_value == value,
+            HavingExpr::Ne { value } => agg_value != value,
+            HavingExpr::Gt { value } => self.compare_values(agg_value, value) > 0,
+            HavingExpr::Ge { value } => self.compare_values(agg_value, value) >= 0,
+            HavingExpr::Lt { value } => self.compare_values(agg_value, value) < 0,
+            HavingExpr::Le { value } => self.compare_values(agg_value, value) <= 0,
+        }
     }
 }
 

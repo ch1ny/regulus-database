@@ -546,6 +546,368 @@ fn test_right_join_with_index() {
     assert!(pen_row.get("users.name").unwrap().as_text().is_none());
 }
 
+// ==================== 聚合函数测试 ====================
+
+/// 测试 COUNT(*) 基本功能
+#[test]
+fn test_count_star() {
+    let db = Database::new();
+
+    db.create_table("users", vec![
+        Column::new("id", DataType::integer()),
+        Column::new("name", DataType::text()),
+    ]).unwrap();
+
+    // 空表
+    let result = db.query("users").count().execute().unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].get("COUNT(*)").unwrap().as_integer(), Some(0));
+
+    // 插入 3 条数据
+    for i in 1..=3 {
+        db.insert("users", vec![
+            ("id", DbValue::integer(i)),
+            ("name", DbValue::text(format!("User{}", i))),
+        ]).unwrap();
+    }
+
+    let result = db.query("users").count().execute().unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].get("COUNT(*)").unwrap().as_integer(), Some(3));
+}
+
+/// 测试 COUNT(column) 统计非 NULL 值
+#[test]
+fn test_count_column() {
+    let db = Database::new();
+
+    db.create_table("users", vec![
+        Column::new("id", DataType::integer()),
+        Column::new("name", DataType::text()),
+        Column::new("email", DataType::text()),
+    ]).unwrap();
+
+    db.insert("users", vec![
+        ("id", DbValue::integer(1)),
+        ("name", DbValue::text("Alice")),
+        ("email", DbValue::text("alice@example.com")),
+    ]).unwrap();
+
+    // 不插入 email（省略该字段）
+    db.insert("users", vec![
+        ("id", DbValue::integer(2)),
+        ("name", DbValue::text("Bob")),
+    ]).unwrap();
+
+    db.insert("users", vec![
+        ("id", DbValue::integer(3)),
+        ("name", DbValue::text("Charlie")),
+        ("email", DbValue::text("charlie@example.com")),
+    ]).unwrap();
+
+    // COUNT(*) 应该返回 3
+    let result = db.query("users").count().execute().unwrap();
+    assert_eq!(result[0].get("COUNT(*)").unwrap().as_integer(), Some(3));
+
+    // COUNT(email) 应该返回 2（只有 2 条有 email）
+    let result = db.query("users").count_column("email").execute().unwrap();
+    assert_eq!(result[0].get("COUNT(email)").unwrap().as_integer(), Some(2));
+}
+
+/// 测试 SUM 功能
+#[test]
+fn test_sum() {
+    let db = Database::new();
+
+    db.create_table("orders", vec![
+        Column::new("id", DataType::integer()),
+        Column::new("amount", DataType::integer()),
+    ]).unwrap();
+
+    db.insert("orders", vec![
+        ("id", DbValue::integer(1)),
+        ("amount", DbValue::integer(100)),
+    ]).unwrap();
+
+    db.insert("orders", vec![
+        ("id", DbValue::integer(2)),
+        ("amount", DbValue::integer(200)),
+    ]).unwrap();
+
+    db.insert("orders", vec![
+        ("id", DbValue::integer(3)),
+        ("amount", DbValue::integer(300)),
+    ]).unwrap();
+
+    let result = db.query("orders").sum("amount").execute().unwrap();
+    assert_eq!(result[0].get("SUM(amount)").unwrap().as_integer(), Some(600));
+}
+
+/// 测试 AVG 功能
+#[test]
+fn test_avg() {
+    let db = Database::new();
+
+    db.create_table("scores", vec![
+        Column::new("id", DataType::integer()),
+        Column::new("score", DataType::integer()),
+    ]).unwrap();
+
+    db.insert("scores", vec![
+        ("id", DbValue::integer(1)),
+        ("score", DbValue::integer(80)),
+    ]).unwrap();
+
+    db.insert("scores", vec![
+        ("id", DbValue::integer(2)),
+        ("score", DbValue::integer(90)),
+    ]).unwrap();
+
+    db.insert("scores", vec![
+        ("id", DbValue::integer(3)),
+        ("score", DbValue::integer(100)),
+    ]).unwrap();
+
+    let result = db.query("scores").avg("score").execute().unwrap();
+    let avg = result[0].get("AVG(score)").unwrap().as_real().unwrap();
+    assert!((avg - 90.0).abs() < 0.001);
+}
+
+/// 测试 MAX 和 MIN 功能
+#[test]
+fn test_max_min() {
+    let db = Database::new();
+
+    db.create_table("products", vec![
+        Column::new("id", DataType::integer()),
+        Column::new("price", DataType::real()),
+    ]).unwrap();
+
+    db.insert("products", vec![
+        ("id", DbValue::integer(1)),
+        ("price", DbValue::real(19.99)),
+    ]).unwrap();
+
+    db.insert("products", vec![
+        ("id", DbValue::integer(2)),
+        ("price", DbValue::real(99.99)),
+    ]).unwrap();
+
+    db.insert("products", vec![
+        ("id", DbValue::integer(3)),
+        ("price", DbValue::real(49.99)),
+    ]).unwrap();
+
+    // MAX
+    let result = db.query("products").max("price").execute().unwrap();
+    assert_eq!(result[0].get("MAX(price)").unwrap().as_real(), Some(99.99));
+
+    // MIN
+    let result = db.query("products").min("price").execute().unwrap();
+    assert_eq!(result[0].get("MIN(price)").unwrap().as_real(), Some(19.99));
+}
+
+/// 测试 GROUP BY 功能
+#[test]
+fn test_group_by() {
+    let db = Database::new();
+
+    db.create_table("orders", vec![
+        Column::new("id", DataType::integer()),
+        Column::new("user_id", DataType::integer()),
+        Column::new("amount", DataType::integer()),
+    ]).unwrap();
+
+    // 用户 1 有 3 个订单
+    db.insert("orders", vec![
+        ("id", DbValue::integer(1)),
+        ("user_id", DbValue::integer(1)),
+        ("amount", DbValue::integer(100)),
+    ]).unwrap();
+
+    db.insert("orders", vec![
+        ("id", DbValue::integer(2)),
+        ("user_id", DbValue::integer(1)),
+        ("amount", DbValue::integer(200)),
+    ]).unwrap();
+
+    db.insert("orders", vec![
+        ("id", DbValue::integer(3)),
+        ("user_id", DbValue::integer(1)),
+        ("amount", DbValue::integer(300)),
+    ]).unwrap();
+
+    // 用户 2 有 2 个订单
+    db.insert("orders", vec![
+        ("id", DbValue::integer(4)),
+        ("user_id", DbValue::integer(2)),
+        ("amount", DbValue::integer(400)),
+    ]).unwrap();
+
+    db.insert("orders", vec![
+        ("id", DbValue::integer(5)),
+        ("user_id", DbValue::integer(2)),
+        ("amount", DbValue::integer(500)),
+    ]).unwrap();
+
+    // GROUP BY user_id, COUNT(*)
+    let result = db.query("orders")
+        .group_by(&["user_id"])
+        .count()
+        .execute()
+        .unwrap();
+
+    assert_eq!(result.len(), 2);
+
+    // 验证每个用户的订单数
+    let user1_row = result.iter()
+        .find(|r| r.get("user_id").unwrap().as_integer() == Some(1))
+        .unwrap();
+    assert_eq!(user1_row.get("COUNT(*)").unwrap().as_integer(), Some(3));
+
+    let user2_row = result.iter()
+        .find(|r| r.get("user_id").unwrap().as_integer() == Some(2))
+        .unwrap();
+    assert_eq!(user2_row.get("COUNT(*)").unwrap().as_integer(), Some(2));
+}
+
+/// 测试 GROUP BY + SUM
+#[test]
+fn test_group_by_with_sum() {
+    let db = Database::new();
+
+    db.create_table("orders", vec![
+        Column::new("id", DataType::integer()),
+        Column::new("user_id", DataType::integer()),
+        Column::new("amount", DataType::integer()),
+    ]).unwrap();
+
+    // 用户 1 的订单
+    db.insert("orders", vec![
+        ("id", DbValue::integer(1)),
+        ("user_id", DbValue::integer(1)),
+        ("amount", DbValue::integer(100)),
+    ]).unwrap();
+
+    db.insert("orders", vec![
+        ("id", DbValue::integer(2)),
+        ("user_id", DbValue::integer(1)),
+        ("amount", DbValue::integer(200)),
+    ]).unwrap();
+
+    // 用户 2 的订单
+    db.insert("orders", vec![
+        ("id", DbValue::integer(3)),
+        ("user_id", DbValue::integer(2)),
+        ("amount", DbValue::integer(300)),
+    ]).unwrap();
+
+    // GROUP BY user_id, SUM(amount)
+    let result = db.query("orders")
+        .group_by(&["user_id"])
+        .sum("amount")
+        .execute()
+        .unwrap();
+
+    assert_eq!(result.len(), 2);
+
+    let user1_row = result.iter()
+        .find(|r| r.get("user_id").unwrap().as_integer() == Some(1))
+        .unwrap();
+    assert_eq!(user1_row.get("SUM(amount)").unwrap().as_integer(), Some(300));
+
+    let user2_row = result.iter()
+        .find(|r| r.get("user_id").unwrap().as_integer() == Some(2))
+        .unwrap();
+    assert_eq!(user2_row.get("SUM(amount)").unwrap().as_integer(), Some(300));
+}
+
+/// 测试 HAVING 子句
+#[test]
+fn test_having() {
+    let db = Database::new();
+
+    db.create_table("orders", vec![
+        Column::new("id", DataType::integer()),
+        Column::new("user_id", DataType::integer()),
+        Column::new("amount", DataType::integer()),
+    ]).unwrap();
+
+    // 用户 1 有 3 个订单
+    for i in 1..=3 {
+        db.insert("orders", vec![
+            ("id", DbValue::integer(i)),
+            ("user_id", DbValue::integer(1)),
+            ("amount", DbValue::integer(100)),
+        ]).unwrap();
+    }
+
+    // 用户 2 只有 1 个订单
+    db.insert("orders", vec![
+        ("id", DbValue::integer(4)),
+        ("user_id", DbValue::integer(2)),
+        ("amount", DbValue::integer(200)),
+    ]).unwrap();
+
+    // HAVING COUNT(*) > 1 - 只返回订单数大于 1 的用户
+    let result = db.query("orders")
+        .group_by(&["user_id"])
+        .count()
+        .having_gt(DbValue::integer(1))
+        .execute()
+        .unwrap();
+
+    // 只有用户 1 符合条件（3 个订单）
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].get("user_id").unwrap().as_integer(), Some(1));
+    assert_eq!(result[0].get("COUNT(*)").unwrap().as_integer(), Some(3));
+}
+
+/// 测试聚合函数与过滤条件结合
+#[test]
+fn test_aggregate_with_filter() {
+    let db = Database::new();
+
+    db.create_table("orders", vec![
+        Column::new("id", DataType::integer()),
+        Column::new("user_id", DataType::integer()),
+        Column::new("amount", DataType::integer()),
+        Column::new("status", DataType::text()),
+    ]).unwrap();
+
+    // 已完成的订单
+    db.insert("orders", vec![
+        ("id", DbValue::integer(1)),
+        ("user_id", DbValue::integer(1)),
+        ("amount", DbValue::integer(100)),
+        ("status", DbValue::text("completed")),
+    ]).unwrap();
+
+    db.insert("orders", vec![
+        ("id", DbValue::integer(2)),
+        ("user_id", DbValue::integer(1)),
+        ("amount", DbValue::integer(200)),
+        ("status", DbValue::text("completed")),
+    ]).unwrap();
+
+    // 未完成的订单
+    db.insert("orders", vec![
+        ("id", DbValue::integer(3)),
+        ("user_id", DbValue::integer(1)),
+        ("amount", DbValue::integer(300)),
+        ("status", DbValue::text("pending")),
+    ]).unwrap();
+
+    // 只统计已完成的订单
+    let result = db.query("orders")
+        .eq("status", DbValue::text("completed"))
+        .sum("amount")
+        .execute()
+        .unwrap();
+
+    assert_eq!(result[0].get("SUM(amount)").unwrap().as_integer(), Some(300));
+}
+
 /// 测试 FULL OUTER JOIN 基本功能
 #[test]
 fn test_full_outer_join_basic() {
