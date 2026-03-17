@@ -1,6 +1,7 @@
 use crate::storage::{MemoryEngine, Row, StorageEngine, RowId};
 use crate::types::{DbValue, DbResult};
 use crate::index::btree::BTreeIndex;
+use crate::index::manager::IndexMeta;
 use std::sync::{Arc, RwLock};
 
 /// 排序方向
@@ -166,7 +167,59 @@ impl QueryBuilder {
     }
 
     /// 查找最佳可用索引（优先等值条件，其次范围条件）
-    fn find_best_index<'a>(&'a self, engine: &'a MemoryEngine) -> Option<(&'a String, &'a BTreeIndex)> {
+    /// 返回：(索引列名，索引对象，构建的复合键值)
+    fn find_best_index<'a>(&'a self, engine: &'a MemoryEngine) -> Option<(&'a IndexMeta, &'a BTreeIndex, Vec<DbValue>)> {
+        // 收集所有等值条件
+        let eq_filters: Vec<&FilterExpr> = self.filters.iter().filter(|f| matches!(f, FilterExpr::Eq { .. })).collect();
+
+        // 收集所有范围条件
+        let range_filters: Vec<&FilterExpr> = self.filters.iter().filter(|f| {
+            matches!(f, FilterExpr::Gt { .. } | FilterExpr::Ge { .. } | FilterExpr::Lt { .. } | FilterExpr::Le { .. })
+        }).collect();
+
+        // 使用引擎的 find_best_index 方法查找最佳复合索引
+        if !eq_filters.is_empty() {
+            let eq_columns: Vec<&str> = eq_filters.iter().map(|f| {
+                if let FilterExpr::Eq { field, .. } = f {
+                    field.as_str()
+                } else {
+                    ""
+                }
+            }).collect();
+
+            if let Some((meta, index)) = engine.find_best_index(&self.table, &eq_columns) {
+                // 构建复合键值
+                let mut key_values = Vec::new();
+                for col in &meta.columns {
+                    let value = eq_filters.iter()
+                        .find_map(|f| {
+                            if let FilterExpr::Eq { field, value } = f {
+                                if field == col { Some(value) } else { None }
+                            } else { None }
+                        });
+                    if let Some(v) = value {
+                        key_values.push(v.clone());
+                    } else {
+                        // 对于前缀匹配，后续列不需要
+                        break;
+                    }
+                }
+                if !key_values.is_empty() {
+                    return Some((meta, index, key_values));
+                }
+            }
+        }
+
+        // 检查范围条件（暂时不处理，由单列索引方法处理）
+        if let Some(_filter) = range_filters.first() {
+            // 范围条件的索引查找在 find_best_single_index 中处理
+        }
+
+        None
+    }
+
+    /// 查找最佳单列索引（向后兼容）
+    fn find_best_single_index<'a>(&'a self, engine: &'a MemoryEngine) -> Option<(&'a String, &'a BTreeIndex)> {
         // 优先查找等值条件的字段
         for filter in &self.filters {
             if let FilterExpr::Eq { field, .. } = filter {
@@ -199,6 +252,36 @@ impl QueryBuilder {
         for row_id in row_ids {
             if let Some(row) = engine.get(&self.table, row_id)? {
                 // 需要验证所有过滤条件（因为索引只针对一个字段）
+                if self.matches_all_filters(row) {
+                    results.push(row.clone());
+                }
+            }
+        }
+
+        // 排序
+        if let Some((field, order)) = &self.order_by {
+            results.sort_by(|a, b| {
+                self.compare_rows(a, b, field, *order)
+            });
+        }
+
+        // 分页
+        let start = self.offset.unwrap_or(0);
+        let end = start + self.limit.unwrap_or(results.len());
+
+        Ok(results.into_iter().skip(start).take(end - start).collect())
+    }
+
+    /// 使用复合索引执行查询
+    fn execute_with_composite_index(&self, engine: &MemoryEngine, _meta: &IndexMeta, index: &BTreeIndex, key_values: &[DbValue]) -> DbResult<Vec<Row>> {
+        // 从复合索引中获取匹配的 row_id
+        let row_ids = index.search_composite(key_values);
+
+        // 根据 row_ids 回表查询完整行数据
+        let mut results = Vec::new();
+        for row_id in row_ids {
+            if let Some(row) = engine.get(&self.table, row_id)? {
+                // 验证所有过滤条件
                 if self.matches_all_filters(row) {
                     results.push(row.clone());
                 }
@@ -949,9 +1032,15 @@ impl QueryBuilder {
             return self.execute_join(&engine);
         }
 
-        // 尝试查找最佳索引
-        if let Some((field, index)) = self.find_best_index(&engine) {
-            // 使用索引优化查询
+        // 尝试查找最佳复合索引
+        if let Some((meta, index, key_values)) = self.find_best_index(&engine) {
+            // 使用复合索引优化查询
+            return self.execute_with_composite_index(&engine, meta, index, &key_values);
+        }
+
+        // 尝试查找最佳单列索引（向后兼容）
+        if let Some((field, index)) = self.find_best_single_index(&engine) {
+            // 使用单列索引优化查询
             return self.execute_with_index(&engine, field, index);
         }
 

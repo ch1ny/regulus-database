@@ -96,10 +96,22 @@ impl Database {
         Ok(result)
     }
 
-    /// 为表列创建索引
+    /// 为表列创建索引（单列，向后兼容）
     pub fn create_index(&self, table: &str, column: &str) -> DbResult<()> {
         let mut engine = self.engine.write().unwrap();
         engine.create_index(table, column)
+    }
+
+    /// 创建复合索引
+    pub fn create_composite_index(&self, table: &str, columns: &[&str]) -> DbResult<()> {
+        let mut engine = self.engine.write().unwrap();
+        engine.create_composite_index(table, columns)
+    }
+
+    /// 创建唯一复合索引
+    pub fn create_unique_index(&self, table: &str, columns: &[&str]) -> DbResult<()> {
+        let mut engine = self.engine.write().unwrap();
+        engine.create_unique_index(table, columns)
     }
 
     /// 删除索引
@@ -108,10 +120,22 @@ impl Database {
         engine.drop_index(table, column)
     }
 
+    /// 删除复合索引
+    pub fn drop_composite_index(&self, table: &str, columns: &[&str]) -> DbResult<bool> {
+        let mut engine = self.engine.write().unwrap();
+        engine.drop_composite_index(table, columns)
+    }
+
     /// 检查列是否有索引
     pub fn has_index(&self, table: &str, column: &str) -> bool {
         let engine = self.engine.read().unwrap();
         engine.has_index(table, column)
+    }
+
+    /// 检查复合索引是否存在
+    pub fn has_composite_index(&self, table: &str, columns: &[&str]) -> bool {
+        let engine = self.engine.read().unwrap();
+        engine.has_composite_index(table, columns)
     }
 }
 

@@ -61,7 +61,7 @@ impl Default for BTreeLeafNode {
 
 /// B+ 树索引
 /// 当前使用 BTreeMap 实现，提供 O(log n) 的查找性能
-/// 未来可以替换为手写的 B+ 树以支持更多特性
+/// 支持单列索引和复合索引
 #[derive(Debug, Clone)]
 pub struct BTreeIndex {
     pub order: usize,
@@ -70,14 +70,26 @@ pub struct BTreeIndex {
     pub last_leaf: Option<NodeId>,
     pub nodes: HashMap<NodeId, BTreeNode>,
     pub next_node_id: NodeId,
+    /// 索引列名列表（单列为 1 个元素，复合索引为多个元素）
+    pub columns: Vec<String>,
+    /// 是否为复合索引
+    pub is_composite: bool,
     /// 实际存储数据的 BTreeMap：键 -> RowId 列表（支持重复键）
-    data: BTreeMap<DbValue, Vec<RowId>>,
+    /// 单列索引：Vec 长度为 1
+    /// 复合索引：Vec 长度为列数
+    data: BTreeMap<Vec<DbValue>, Vec<RowId>>,
 }
 
 use std::collections::HashMap;
 
 impl BTreeIndex {
+    /// 创建单列索引
     pub fn new(order: usize) -> Self {
+        Self::new_composite(order, &["column"])
+    }
+
+    /// 创建复合索引
+    pub fn new_composite(order: usize, columns: &[&str]) -> Self {
         let mut index = BTreeIndex {
             order,
             root: 0,
@@ -85,6 +97,8 @@ impl BTreeIndex {
             last_leaf: None,
             nodes: HashMap::new(),
             next_node_id: 0,
+            columns: columns.iter().map(|s| s.to_string()).collect(),
+            is_composite: columns.len() > 1,
             data: BTreeMap::new(),
         };
 
@@ -105,40 +119,75 @@ impl BTreeIndex {
         id
     }
 
-    /// 插入键值对 - O(log n)
+    /// 插入键值对（单列索引）- O(log n)
     pub fn insert(&mut self, key: DbValue, value: RowId) {
+        self.insert_composite(vec![key], value);
+    }
+
+    /// 插入复合键值对 - O(log n)
+    pub fn insert_composite(&mut self, key: Vec<DbValue>, value: RowId) {
         self.data.entry(key).or_insert_with(Vec::new).push(value);
     }
 
-    /// 精确查找 - O(log n)
+    /// 精确查找（单列索引）- O(log n)
     pub fn search(&self, key: &DbValue) -> Vec<RowId> {
+        self.search_composite(&[key.clone()])
+    }
+
+    /// 复合键精确查找 - O(log n)
+    pub fn search_composite(&self, key: &[DbValue]) -> Vec<RowId> {
         self.data.get(key).cloned().unwrap_or_default()
     }
 
-    /// 范围查找 [start, end) - O(log n + k)，k 为结果数
+    /// 范围查找（单列索引）[start, end) - O(log n + k)，k 为结果数
     pub fn range(&self, start: &DbValue, end: &DbValue) -> Vec<RowId> {
+        self.range_composite(&[start.clone()], &[end.clone()])
+    }
+
+    /// 复合键范围查找 [start, end) - O(log n + k)
+    pub fn range_composite(&self, start: &[DbValue], end: &[DbValue]) -> Vec<RowId> {
         let mut results = Vec::new();
 
-        for (_key, values) in self.data.range((start)..(end)) {
+        // 使用 Vec<DbValue> 作为 range 的边界
+        let start_vec = start.to_vec();
+        let end_vec = end.to_vec();
+        for (_key, values) in self.data.range(start_vec..end_vec) {
             results.extend(values.iter().copied());
         }
 
         results
     }
 
-    /// 范围查找 >= start
+    /// 范围查找 >= start（单列索引）
     pub fn range_from(&self, start: &DbValue) -> Vec<RowId> {
         let mut results = Vec::new();
 
-        for (_key, values) in self.data.range((start)..) {
+        for (_key, values) in self.data.range([start.clone()].to_vec()..) {
             results.extend(values.iter().copied());
         }
 
         results
     }
 
-    /// 删除 - O(log n)
+    /// 复合键范围查找 >= start
+    pub fn range_from_composite(&self, start: &[DbValue]) -> Vec<RowId> {
+        let mut results = Vec::new();
+
+        let start_vec = start.to_vec();
+        for (_key, values) in self.data.range(start_vec..) {
+            results.extend(values.iter().copied());
+        }
+
+        results
+    }
+
+    /// 删除（单列索引）- O(log n)
     pub fn remove(&mut self, key: &DbValue, value: RowId) -> bool {
+        self.remove_composite(&[key.clone()], value)
+    }
+
+    /// 复合键删除 - O(log n)
+    pub fn remove_composite(&mut self, key: &[DbValue], value: RowId) -> bool {
         if let Some(values) = self.data.get_mut(key) {
             if let Some(pos) = values.iter().position(|&v| v == value) {
                 values.remove(pos);
@@ -232,5 +281,71 @@ mod tests {
 
         btree.remove(&DbValue::integer(10), RowId::new(1));
         assert_eq!(btree.search(&DbValue::integer(10)).len(), 1);
+    }
+
+    #[test]
+    fn test_composite_index_insert_search() {
+        let mut btree = BTreeIndex::new_composite(4, &["age", "city"]);
+        assert!(btree.is_composite);
+        assert_eq!(btree.columns, vec!["age", "city"]);
+
+        // 插入复合键 (age=25, city="Beijing")
+        btree.insert_composite(
+            vec![DbValue::integer(25), DbValue::text("Beijing")],
+            RowId::new(1)
+        );
+        btree.insert_composite(
+            vec![DbValue::integer(25), DbValue::text("Shanghai")],
+            RowId::new(2)
+        );
+        btree.insert_composite(
+            vec![DbValue::integer(30), DbValue::text("Beijing")],
+            RowId::new(3)
+        );
+
+        // 精确查找
+        let results = btree.search_composite(&[
+            DbValue::integer(25),
+            DbValue::text("Beijing")
+        ]);
+        assert_eq!(results, vec![RowId::new(1)]);
+    }
+
+    #[test]
+    fn test_composite_index_range() {
+        let mut btree = BTreeIndex::new_composite(4, &["age", "city"]);
+
+        // 插入数据
+        for age in 20..30 {
+            for city in &["Beijing", "Shanghai"] {
+                btree.insert_composite(
+                    vec![DbValue::integer(age), DbValue::text(*city)],
+                    RowId::new((age * 10) as u64)
+                );
+            }
+        }
+
+        // 范围查找：age >= 25
+        let results = btree.range_from_composite(&[DbValue::integer(25)]);
+        assert_eq!(results.len(), 10); // 5 ages * 2 cities
+    }
+
+    #[test]
+    fn test_composite_index_partial_match() {
+        let mut btree = BTreeIndex::new_composite(4, &["a", "b", "c"]);
+
+        // 插入数据
+        btree.insert_composite(vec![DbValue::integer(1), DbValue::integer(2), DbValue::integer(3)], RowId::new(1));
+        btree.insert_composite(vec![DbValue::integer(1), DbValue::integer(2), DbValue::integer(4)], RowId::new(2));
+        btree.insert_composite(vec![DbValue::integer(1), DbValue::integer(3), DbValue::integer(5)], RowId::new(3));
+
+        // 前缀匹配：a=1, b=2
+        let results = btree.search_composite(&[
+            DbValue::integer(1),
+            DbValue::integer(2)
+        ]);
+        // 注意：复合索引精确匹配需要完整键，这里应该返回空
+        // 前缀匹配需要使用 range
+        assert!(results.is_empty());
     }
 }
