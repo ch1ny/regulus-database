@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 include = ["src/**/*.rs", "Cargo.toml", "LICENSE", "README"]
 license-file = "LICENSE"
+description = "A Simple API-only Database Application Written by Rust"
 
 [dependencies]
 thiserror = "2"
