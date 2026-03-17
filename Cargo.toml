@@ -2,6 +2,8 @@
 name = "regulus-db"
 version = "0.1.0"
 edition = "2021"
+include = ["src/**/*.rs", "Cargo.toml", "LICENSE", "README"]
+license-file = "LICENSE"
 
 [dependencies]
 thiserror = "2"
