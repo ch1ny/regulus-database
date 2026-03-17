@@ -40,8 +40,10 @@ regulus-db = "0.1.0"
 
 ```rust
 use regulus_db::{Database, Column, DataType, DbValue};
+use std::path::Path;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 内存模式
     let db = Database::new();
 
     // 创建表
@@ -74,30 +76,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### 持久化模式
 
 ```rust
-use regulus_db::{PersistedEngine, StorageEngine, Column, DataType, DbValue, Row};
+use regulus_db::{Database, Column, DataType, DbValue};
 use std::path::Path;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 打开（或创建）持久化数据库
-    let mut engine = PersistedEngine::open(Path::new("./data"))?;
+    // 打开持久化数据库
+    let db = Database::open(Path::new("./data"))?;
+    // 或创建新数据库（如果已存在则覆盖）
+    let db = Database::create(Path::new("./data"))?;
 
-    // 创建表（自动记录 WAL）
-    let schema = regulus_db::TableSchema::new("users", vec![
+    // 创建表
+    db.create_table("users", vec![
         Column::new("id", DataType::integer()).primary_key(),
         Column::new("name", DataType::text()),
-        Column::new("age", DataType::integer()),
-    ]);
-    engine.create_table(schema)?;
+    ])?;
 
     // 插入数据（自动记录 WAL）
-    let mut row = Row::new();
-    row.insert("id".to_string(), DbValue::integer(1));
-    row.insert("name".to_string(), DbValue::text("Alice"));
-    row.insert("age".to_string(), DbValue::integer(25));
-    engine.insert("users", row)?;
-
-    // 手动触发检查点（可选，WAL > 10MB 时会自动触发）
-    engine.force_checkpoint()?;
+    db.insert("users", vec![
+        ("id", DbValue::integer(1)),
+        ("name", DbValue::text("Alice")),
+    ])?;
 
     Ok(())
 }
@@ -266,6 +264,27 @@ let deleted = db.delete("users")
     .execute()?;
 ```
 
+### 事务中的更新和删除
+
+在事务中，`update` 和 `delete` 使用函数式 API：
+
+```rust
+db.transaction(|tx| {
+    // 更新：table, 条件闭包，更新字段列表
+    tx.update("users",
+        |row| row.get("id").and_then(|v| v.as_integer()) == Some(1),
+        vec![("age", DbValue::integer(26))],
+    )?;
+
+    // 删除：table, 条件闭包
+    tx.delete("users",
+        |row| row.get("active").and_then(|v| v.as_boolean()) == Some(false),
+    )?;
+
+    Ok(())
+})?;
+```
+
 ## 索引
 
 ### 创建索引
@@ -305,9 +324,12 @@ if db.has_composite_index("users", &["last_name", "first_name"]) {
 
 ## 事务
 
+事务支持原子性操作和回滚功能：
+
 ```rust
+// 基本事务
 db.transaction(|tx| {
-    // 事务内的所有操作要么全部成功，要么全部回滚
+    // 插入数据
     tx.insert("users", vec![
         ("id", DbValue::integer(1)),
         ("name", DbValue::text("Alice")),
@@ -318,12 +340,23 @@ db.transaction(|tx| {
         ("name", DbValue::text("Bob")),
     ])?;
 
-    // 查询事务内的数据（包括未提交的）
-    let count = tx.query("users").execute()?.len();
-    println!("事务内用户数：{}", count);
+    // 查询事务内的数据
+    let rows = tx.query_all("users")?;
+    println!("事务内用户数：{}", rows.len());
 
     Ok(())  // 提交事务
-    // 或者返回 Err 来回滚事务
+})?;
+
+// 回滚示例
+db.transaction(|tx| {
+    tx.insert("users", vec![
+        ("id", DbValue::integer(3)),
+        ("name", DbValue::text("Charlie")),
+    ])?;
+
+    // 手动回滚
+    tx.rollback()?;
+    Ok(())  // Charlie 不会被插入
 })?;
 ```
 

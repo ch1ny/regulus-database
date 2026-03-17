@@ -25,18 +25,16 @@ fn test_transaction_atomicity() {
     // 转账事务：从账户 1 转 200 到账户 2
     let result = db.transaction(|tx| {
         // 扣款
-        tx.update("accounts")
-            .eq("id", DbValue::integer(1))
-            .set("balance", DbValue::real(800.0))
-            .execute()
-            .unwrap();
+        tx.update("accounts",
+            |row| row.get("id").and_then(|v| v.as_integer()) == Some(1),
+            vec![("balance", DbValue::real(800.0))],
+        ).unwrap();
 
         // 收款
-        tx.update("accounts")
-            .eq("id", DbValue::integer(2))
-            .set("balance", DbValue::real(700.0))
-            .execute()
-            .unwrap();
+        tx.update("accounts",
+            |row| row.get("id").and_then(|v| v.as_integer()) == Some(2),
+            vec![("balance", DbValue::real(700.0))],
+        ).unwrap();
 
         Ok(())
     });
@@ -44,16 +42,19 @@ fn test_transaction_atomicity() {
     assert!(result.is_ok());
 
     // 验证余额
-    let acc1 = db.query("accounts")
-        .eq("id", DbValue::integer(1))
-        .execute()
-        .unwrap();
+    let rows = db.transaction(|tx| {
+        let rows = tx.query_all("accounts")?;
+        Ok(rows)
+    }).unwrap();
+
+    let acc1: Vec<_> = rows.iter()
+        .filter(|r| r.get("id").and_then(|v| v.as_integer()) == Some(1))
+        .collect();
     assert_eq!(acc1[0].get("balance").unwrap().as_real(), Some(800.0));
 
-    let acc2 = db.query("accounts")
-        .eq("id", DbValue::integer(2))
-        .execute()
-        .unwrap();
+    let acc2: Vec<_> = rows.iter()
+        .filter(|r| r.get("id").and_then(|v| v.as_integer()) == Some(2))
+        .collect();
     assert_eq!(acc2[0].get("balance").unwrap().as_real(), Some(700.0));
 }
 
@@ -83,8 +84,12 @@ fn test_transaction_multiple_operations() {
 
     assert!(result.is_ok());
 
-    let orders = db.query("orders").execute().unwrap();
-    assert_eq!(orders.len(), 5);
+    let result = db.transaction(|tx| {
+        let orders = tx.query_all("orders")?;
+        Ok(orders.len())
+    });
+
+    assert_eq!(result.unwrap(), 5);
 }
 
 #[test]
@@ -104,19 +109,14 @@ fn test_transaction_query_within_transaction() {
     // 在事务中查询并更新
     let result = db.transaction(|tx| {
         // 查询当前值
-        let items = tx.query("items")
-            .eq("id", DbValue::integer(1))
-            .execute()
-            .unwrap();
-
+        let items = tx.query_all("items")?;
         let current_value = items[0].get("value").unwrap().as_integer().unwrap();
 
         // 更新为新值
-        tx.update("items")
-            .eq("id", DbValue::integer(1))
-            .set("value", DbValue::integer(current_value + 5))
-            .execute()
-            .unwrap();
+        tx.update("items",
+            |row| row.get("id").and_then(|v| v.as_integer()) == Some(1),
+            vec![("value", DbValue::integer(current_value + 5))],
+        )?;
 
         Ok(current_value)
     });
@@ -124,11 +124,15 @@ fn test_transaction_query_within_transaction() {
     assert_eq!(result.unwrap(), 10);
 
     // 验证更新后的值
-    let item = db.query("items")
-        .eq("id", DbValue::integer(1))
-        .execute()
-        .unwrap();
-    assert_eq!(item[0].get("value").unwrap().as_integer(), Some(15));
+    let result = db.transaction(|tx| {
+        let items = tx.query_all("items")?;
+        let item = items.iter()
+            .find(|r| r.get("id").and_then(|v| v.as_integer()) == Some(1))
+            .unwrap();
+        Ok(item.get("value").unwrap().as_integer().unwrap())
+    });
+
+    assert_eq!(result.unwrap(), 15);
 }
 
 #[test]
@@ -142,9 +146,85 @@ fn test_transaction_empty() {
 
     // 空事务（只查询）
     let result = db.transaction(|tx| {
-        let count = tx.query("data").execute()?.len();
-        Ok(count)
+        let rows = tx.query_all("data")?;
+        Ok(rows.len())
     });
 
     assert_eq!(result.unwrap(), 0);
+}
+
+#[test]
+fn test_transaction_rollback() {
+    let db = Database::new();
+
+    db.create_table("users", vec![
+        Column::new("id", DataType::integer()),
+        Column::new("name", DataType::text()),
+    ]).unwrap();
+
+    // 插入一条数据
+    db.insert("users", vec![
+        ("id", DbValue::integer(1)),
+        ("name", DbValue::text("Alice")),
+    ]).unwrap();
+
+    // 事务中插入后回滚
+    let result = db.transaction(|tx| {
+        tx.insert("users", vec![
+            ("id", DbValue::integer(2)),
+            ("name", DbValue::text("Bob")),
+        ])?;
+
+        // 手动回滚
+        tx.rollback()?;
+        Ok(())
+    });
+
+    assert!(result.is_ok());
+
+    // 验证 Bob 没有被插入
+    let result = db.transaction(|tx| {
+        let rows = tx.query_all("users")?;
+        Ok(rows.len())
+    });
+
+    assert_eq!(result.unwrap(), 1);
+}
+
+#[test]
+fn test_transaction_update_rollback() {
+    let db = Database::new();
+
+    db.create_table("users", vec![
+        Column::new("id", DataType::integer()),
+        Column::new("name", DataType::text()),
+    ]).unwrap();
+
+    // 插入一条数据
+    db.insert("users", vec![
+        ("id", DbValue::integer(1)),
+        ("name", DbValue::text("Alice")),
+    ]).unwrap();
+
+    // 事务中更新后回滚
+    let result = db.transaction(|tx| {
+        tx.update("users",
+            |row| row.get("id").and_then(|v| v.as_integer()) == Some(1),
+            vec![("name", DbValue::text("Bob"))],
+        )?;
+
+        // 手动回滚
+        tx.rollback()?;
+        Ok(())
+    });
+
+    assert!(result.is_ok());
+
+    // 验证名字没有被更新
+    let result = db.transaction(|tx| {
+        let rows = tx.query_all("users")?;
+        Ok(rows[0].get("name").unwrap().as_text().unwrap().to_string())
+    });
+
+    assert_eq!(result.unwrap(), "Alice");
 }
