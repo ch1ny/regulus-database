@@ -3,15 +3,16 @@ pub mod storage;
 pub mod query;
 pub mod index;
 pub mod transaction;
+pub mod persistence;
 
 pub use types::{DbValue, DataType, Column, TableSchema, DbError, DbResult};
-pub use storage::{MemoryEngine, StorageEngine, Row, RowId};
+pub use storage::{MemoryEngine, PersistedEngine, StorageEngine, Row, RowId};
 pub use query::{QueryBuilder, UpdateBuilder, DeleteBuilder, Order, JoinType};
 pub use transaction::Transaction;
 
 use std::sync::{Arc, RwLock};
 
-/// 数据库主结构
+/// 数据库主结构（纯内存模式）
 pub struct Database {
     engine: Arc<RwLock<MemoryEngine>>,
 }

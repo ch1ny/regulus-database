@@ -402,7 +402,7 @@ impl QueryBuilder {
     fn prefix_row(&self, row: &Row, table: &str) -> Row {
         row.iter()
             .map(|(k, v)| (format!("{}.{}", table, k), v.clone()))
-            .collect()
+            .collect::<Row>()
     }
 
     /// 创建 NULL 行（用于 LEFT/RIGHT JOIN 无匹配时）
@@ -870,7 +870,9 @@ impl QueryBuilder {
             if let Some(right_row) = engine.get(&join.right_table, row_id)? {
                 let right_prefixed = self.prefix_row(right_row, &join.right_table);
                 let mut merged = current_row.clone();
-                merged.extend(right_prefixed);
+                for (k, v) in right_prefixed {
+                    merged.insert(k, v);
+                }
 
                 // 递归处理下一个 JOIN
                 self.process_joins(engine, merged, join_index + 1, results)?;
@@ -881,7 +883,9 @@ impl QueryBuilder {
         if !has_match && matches!(join.join_type, JoinType::Left) {
             let null_row = self.create_null_row(engine, &join.right_table)?;
             let mut merged = current_row.clone();
-            merged.extend(null_row);
+            for (k, v) in null_row {
+                merged.insert(k, v);
+            }
 
             // 递归处理下一个 JOIN
             self.process_joins(engine, merged, join_index + 1, results)?;
@@ -1685,10 +1689,10 @@ impl UpdateBuilder {
         // 执行更新
         let mut count = 0;
         for row_id in to_update {
-            let mut update_row: Row = self.values.iter().cloned().collect();
+            let mut update_row: Row = self.values.iter().cloned().collect::<Row>();
             // 保留原有行的其他字段
             if let Some(existing) = engine.get(&self.table, row_id)? {
-                for (key, value) in existing {
+                for (key, value) in existing.iter() {
                     if !update_row.contains_key(key) {
                         update_row.insert(key.clone(), value.clone());
                     }

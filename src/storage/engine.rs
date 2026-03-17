@@ -4,9 +4,10 @@ use crate::index::manager::IndexMeta;
 use crate::index::btree::BTreeIndex;
 use indexmap::IndexMap;
 use std::collections::HashMap;
+use serde::{Serialize, Deserialize};
 
 /// 行 ID 类型
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RowId(pub u64);
 
 impl RowId {
@@ -16,10 +17,96 @@ impl RowId {
 }
 
 /// 行数据 - 使用 IndexMap 保持列顺序
-pub type Row = IndexMap<String, DbValue>;
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Row(pub IndexMap<String, DbValue>);
+
+impl Row {
+    pub fn new() -> Self {
+        Row(IndexMap::new())
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &DbValue)> {
+        self.0.iter()
+    }
+
+    pub fn insert(&mut self, key: String, value: DbValue) -> Option<DbValue> {
+        self.0.insert(key, value)
+    }
+
+    pub fn get(&self, key: &str) -> Option<&DbValue> {
+        self.0.get(key)
+    }
+
+    pub fn get_mut(&mut self, key: &str) -> Option<&mut DbValue> {
+        self.0.get_mut(key)
+    }
+
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.0.contains_key(key)
+    }
+
+    pub fn remove(&mut self, key: &str) -> Option<DbValue> {
+        self.0.shift_remove(key)
+    }
+}
+
+impl std::ops::Deref for Row {
+    type Target = IndexMap<String, DbValue>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Row {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl IntoIterator for Row {
+    type Item = (String, DbValue);
+    type IntoIter = indexmap::map::IntoIter<String, DbValue>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a Row {
+    type Item = (&'a String, &'a DbValue);
+    type IntoIter = indexmap::map::Iter<'a, String, DbValue>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut Row {
+    type Item = (&'a String, &'a mut DbValue);
+    type IntoIter = indexmap::map::IterMut<'a, String, DbValue>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter_mut()
+    }
+}
+
+impl FromIterator<(String, DbValue)> for Row {
+    fn from_iter<T: IntoIterator<Item = (String, DbValue)>>(iter: T) -> Self {
+        Row(iter.into_iter().collect())
+    }
+}
 
 /// 表数据容器
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Table {
     pub schema: TableSchema,
     pub rows: HashMap<RowId, Row>,
@@ -279,6 +366,47 @@ impl MemoryEngine {
     pub fn find_best_index(&self, table: &str, filter_columns: &[&str]) -> Option<(&IndexMeta, &BTreeIndex)> {
         self.indexes.find_best_index(table, filter_columns)
     }
+
+    /// 序列化引擎数据（用于快照）
+    pub fn serialize(&self) -> Result<SerializableEngineData, String> {
+        let tables: HashMap<String, Table> = self.tables.clone();
+        Ok(SerializableEngineData { tables })
+    }
+
+    /// 从序列化数据恢复（用于快照加载）
+    pub fn deserialize(data: SerializableEngineData) -> Self {
+        MemoryEngine {
+            tables: data.tables,
+            indexes: IndexManager::new(),
+        }
+    }
+
+    /// 为恢复创建新的 MemoryEngine（内部使用）
+    #[doc(hidden)]
+    pub fn new_for_restore() -> Self {
+        MemoryEngine {
+            tables: HashMap::new(),
+            indexes: IndexManager::new(),
+        }
+    }
+
+    /// 恢复时插入行（跳过 WAL）
+    #[doc(hidden)]
+    pub fn insert_restored(&mut self, table: &str, row_id: RowId, row: Row) -> DbResult<()> {
+        let tbl = self
+            .tables
+            .get_mut(table)
+            .ok_or_else(|| DbError::TableNotFound(table.to_string()))?;
+
+        tbl.rows.insert(row_id, row);
+        Ok(())
+    }
+}
+
+/// 可序列化的引擎数据
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SerializableEngineData {
+    pub tables: HashMap<String, Table>,
 }
 
 impl Default for MemoryEngine {

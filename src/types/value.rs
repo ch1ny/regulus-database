@@ -1,9 +1,10 @@
 use std::fmt;
 use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
+use serde::{Serialize, Deserialize};
 
 /// 数据库值类型 - 支持 8 种基本类型
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DbValue {
     Null,
     Integer(i64),

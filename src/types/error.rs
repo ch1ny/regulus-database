@@ -1,5 +1,6 @@
 use crate::types::schema::SchemaError;
 use std::fmt;
+use std::io;
 
 /// 数据库错误类型
 #[derive(Debug)]
@@ -16,6 +17,10 @@ pub enum DbError {
     TransactionError(String),
     /// 索引错误
     IndexError(String),
+    /// IO 错误
+    IoError(io::Error),
+    /// 内部错误
+    InternalError(String),
     /// 其他错误
     Other(String),
 }
@@ -29,6 +34,8 @@ impl fmt::Display for DbError {
             DbError::SchemaError(err) => write!(f, "Schema error: {}", err),
             DbError::TransactionError(msg) => write!(f, "Transaction error: {}", msg),
             DbError::IndexError(msg) => write!(f, "Index error: {}", msg),
+            DbError::IoError(err) => write!(f, "IO error: {}", err),
+            DbError::InternalError(msg) => write!(f, "Internal error: {}", msg),
             DbError::Other(msg) => write!(f, "{}", msg),
         }
     }
@@ -39,6 +46,12 @@ impl std::error::Error for DbError {}
 impl From<SchemaError> for DbError {
     fn from(err: SchemaError) -> Self {
         DbError::SchemaError(err)
+    }
+}
+
+impl From<std::io::Error> for DbError {
+    fn from(err: std::io::Error) -> Self {
+        DbError::IoError(err)
     }
 }
 

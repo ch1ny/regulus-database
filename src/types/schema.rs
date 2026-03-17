@@ -1,7 +1,8 @@
 use super::value::DbValue;
+use serde::{Serialize, Deserialize};
 
 /// 数据类型定义
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DataType {
     Null,
     Integer,
@@ -97,7 +98,7 @@ impl std::fmt::Display for DataType {
 }
 
 /// 列定义
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Column {
     pub name: String,
     pub data_type: DataType,
@@ -142,7 +143,7 @@ impl Column {
 }
 
 /// 表结构定义
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TableSchema {
     pub name: String,
     pub columns: Vec<Column>,
