@@ -104,8 +104,8 @@ fn main() {
             ("active", DbValue::boolean(true)),
         ])?;
 
-        let count = tx.query("users").execute()?.len();
-        println!("Users count in transaction: {}", count);
+        let rows = tx.query_all("users")?;
+        println!("Users count in transaction: {}", rows.len());
 
         Ok(())
     }).expect("Transaction failed");

@@ -69,6 +69,43 @@ impl PersistedEngine {
     pub fn inner_mut(&mut self) -> &mut MemoryEngine {
         &mut self.inner
     }
+
+    // ========== 索引方法委托（委托给内部 MemoryEngine） ==========
+
+    /// 为表列创建索引（单列）
+    pub fn create_index(&mut self, table: &str, column: &str) -> DbResult<()> {
+        self.inner.create_index(table, column)
+    }
+
+    /// 创建复合索引
+    pub fn create_composite_index(&mut self, table: &str, columns: &[&str]) -> DbResult<()> {
+        self.inner.create_composite_index(table, columns)
+    }
+
+    /// 创建唯一复合索引
+    pub fn create_unique_index(&mut self, table: &str, columns: &[&str]) -> DbResult<()> {
+        self.inner.create_unique_index(table, columns)
+    }
+
+    /// 删除索引
+    pub fn drop_index(&mut self, table: &str, column: &str) -> DbResult<bool> {
+        self.inner.drop_index(table, column)
+    }
+
+    /// 删除复合索引
+    pub fn drop_composite_index(&mut self, table: &str, columns: &[&str]) -> DbResult<bool> {
+        self.inner.drop_composite_index(table, columns)
+    }
+
+    /// 检查列是否有索引
+    pub fn has_index(&self, table: &str, column: &str) -> bool {
+        self.inner.has_index(table, column)
+    }
+
+    /// 检查复合索引是否存在
+    pub fn has_composite_index(&self, table: &str, columns: &[&str]) -> bool {
+        self.inner.has_composite_index(table, columns)
+    }
 }
 
 impl StorageEngine for PersistedEngine {
