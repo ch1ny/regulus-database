@@ -161,14 +161,14 @@ pub trait StorageEngine {
     /// 检查表是否存在
     fn has_table(&self, name: &str) -> bool;
 
-    /// 获取表 schema
-    fn get_schema(&self, name: &str) -> DbResult<&TableSchema>;
+    /// 获取表 schema（返回克隆，支持锁守卫场景）
+    fn get_schema(&self, name: &str) -> DbResult<TableSchema>;
 
     /// 插入行
     fn insert(&mut self, table: &str, row: Row) -> DbResult<RowId>;
 
-    /// 获取行
-    fn get(&self, table: &str, row_id: RowId) -> DbResult<Option<&Row>>;
+    /// 获取行（返回克隆，支持锁守卫场景）
+    fn get(&self, table: &str, row_id: RowId) -> DbResult<Option<Row>>;
 
     /// 更新行
     fn update(&mut self, table: &str, row_id: RowId, values: Row) -> DbResult<()>;
@@ -176,8 +176,8 @@ pub trait StorageEngine {
     /// 删除行
     fn delete(&mut self, table: &str, row_id: RowId) -> DbResult<Option<Row>>;
 
-    /// 扫描全表
-    fn scan(&self, table: &str) -> DbResult<Vec<(RowId, &Row)>>;
+    /// 扫描全表（返回克隆，支持锁守卫场景）
+    fn scan(&self, table: &str) -> DbResult<Vec<(RowId, Row)>>;
 }
 
 /// 内存存储引擎实现
@@ -437,11 +437,11 @@ impl StorageEngine for MemoryEngine {
         self.tables.contains_key(name)
     }
 
-    fn get_schema(&self, name: &str) -> DbResult<&TableSchema> {
+    fn get_schema(&self, name: &str) -> DbResult<TableSchema> {
         self.tables
             .get(name)
             .ok_or_else(|| DbError::TableNotFound(name.to_string()))
-            .map(|table| &table.schema)
+            .map(|table| table.schema.clone())
     }
 
     fn insert(&mut self, table: &str, row: Row) -> DbResult<RowId> {
@@ -497,12 +497,12 @@ impl StorageEngine for MemoryEngine {
         Ok(row_id)
     }
 
-    fn get(&self, table: &str, row_id: RowId) -> DbResult<Option<&Row>> {
+    fn get(&self, table: &str, row_id: RowId) -> DbResult<Option<Row>> {
         let tbl = self
             .tables
             .get(table)
             .ok_or_else(|| DbError::TableNotFound(table.to_string()))?;
-        Ok(tbl.get(row_id))
+        Ok(tbl.get(row_id).cloned())
     }
 
     fn update(&mut self, table: &str, row_id: RowId, values: Row) -> DbResult<()> {
@@ -641,12 +641,12 @@ impl StorageEngine for MemoryEngine {
         Ok(tbl.remove(row_id))
     }
 
-    fn scan(&self, table: &str) -> DbResult<Vec<(RowId, &Row)>> {
+    fn scan(&self, table: &str) -> DbResult<Vec<(RowId, Row)>> {
         let tbl = self
             .tables
             .get(table)
             .ok_or_else(|| DbError::TableNotFound(table.to_string()))?;
-        Ok(tbl.iter().collect())
+        Ok(tbl.iter().map(|(k, v)| (k, v.clone())).collect())
     }
 }
 

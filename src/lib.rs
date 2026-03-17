@@ -142,49 +142,62 @@ impl Database {
         match &self.engine {
             DatabaseEngine::Memory(engine) => {
                 let e = engine.read().unwrap();
-                e.get(table, row_id).map(|opt| opt.cloned())
+                e.get(table, row_id)
             }
             DatabaseEngine::Persisted(engine) => {
                 let e = engine.read().unwrap();
-                e.get(table, row_id).map(|opt| opt.cloned())
+                e.get(table, row_id)
             }
         }
     }
 
-    /// 查询构建器（仅支持内存模式）
+    /// 查询构建器
+    ///
+    /// 内存模式：返回完整的 QueryBuilder，支持所有功能
+    /// 持久化模式：同样支持 QueryBuilder（通过内部 MemoryEngine 的 Arc）
     pub fn query(&self, table: &str) -> QueryBuilder {
         match &self.engine {
             DatabaseEngine::Memory(engine) => {
                 QueryBuilder::new(table.to_string(), Arc::clone(engine))
             }
-            DatabaseEngine::Persisted(_) => {
-                // 持久化模式需要使用 engine 内部的 MemoryEngine
-                // 这里提供一个简化的查询接口
-                unimplemented!("Query builder for persisted engine - use transaction for now")
+            DatabaseEngine::Persisted(engine) => {
+                // 持久化模式：使用 PersistedEngine 内部的 MemoryEngine Arc
+                let e = engine.read().unwrap();
+                QueryBuilder::new(table.to_string(), e.inner_arc())
             }
         }
     }
 
-    /// 更新构建器（仅支持内存模式）
+    /// 更新构建器
+    ///
+    /// 内存模式：返回完整的 UpdateBuilder，支持所有功能
+    /// 持久化模式：同样支持 UpdateBuilder（通过内部 MemoryEngine 的 Arc）
     pub fn update(&self, table: &str) -> UpdateBuilder {
         match &self.engine {
             DatabaseEngine::Memory(engine) => {
                 UpdateBuilder::new(table.to_string(), Arc::clone(engine))
             }
-            DatabaseEngine::Persisted(_) => {
-                unimplemented!("Update builder for persisted engine - use transaction for now")
+            DatabaseEngine::Persisted(engine) => {
+                // 持久化模式：使用 PersistedEngine 内部的 MemoryEngine Arc
+                let e = engine.read().unwrap();
+                UpdateBuilder::new(table.to_string(), e.inner_arc())
             }
         }
     }
 
-    /// 删除构建器（仅支持内存模式）
+    /// 删除构建器
+    ///
+    /// 内存模式：返回完整的 DeleteBuilder，支持所有功能
+    /// 持久化模式：同样支持 DeleteBuilder（通过内部 MemoryEngine 的 Arc）
     pub fn delete(&self, table: &str) -> DeleteBuilder {
         match &self.engine {
             DatabaseEngine::Memory(engine) => {
                 DeleteBuilder::new(table.to_string(), Arc::clone(engine))
             }
-            DatabaseEngine::Persisted(_) => {
-                unimplemented!("Delete builder for persisted engine - use transaction for now")
+            DatabaseEngine::Persisted(engine) => {
+                // 持久化模式：使用 PersistedEngine 内部的 MemoryEngine Arc
+                let e = engine.read().unwrap();
+                DeleteBuilder::new(table.to_string(), e.inner_arc())
             }
         }
     }
