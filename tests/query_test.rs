@@ -420,3 +420,278 @@ fn test_join_with_index_order_and_pagination() {
     // 第 3 大的金额应该是 300（User3）
     assert_eq!(results[1].get("orders.amount").unwrap().as_integer(), Some(300));
 }
+
+/// 测试 RIGHT JOIN 基本功能
+#[test]
+fn test_right_join_basic() {
+    let db = Database::new();
+
+    // 创建用户表
+    db.create_table("users", vec![
+        Column::new("id", DataType::integer()),
+        Column::new("name", DataType::text()),
+    ]).unwrap();
+
+    // 创建订单表
+    db.create_table("orders", vec![
+        Column::new("id", DataType::integer()),
+        Column::new("user_id", DataType::integer()),
+        Column::new("product", DataType::text()),
+    ]).unwrap();
+
+    // 插入用户数据（只有 2 个用户）
+    db.insert("users", vec![
+        ("id", DbValue::integer(1)),
+        ("name", DbValue::text("Alice")),
+    ]).unwrap();
+
+    db.insert("users", vec![
+        ("id", DbValue::integer(2)),
+        ("name", DbValue::text("Bob")),
+    ]).unwrap();
+
+    // 插入订单数据（有 3 个订单，其中 user_id=3 不存在）
+    db.insert("orders", vec![
+        ("id", DbValue::integer(1)),
+        ("user_id", DbValue::integer(1)),
+        ("product", DbValue::text("Book")),
+    ]).unwrap();
+
+    db.insert("orders", vec![
+        ("id", DbValue::integer(2)),
+        ("user_id", DbValue::integer(1)),
+        ("product", DbValue::text("Pen")),
+    ]).unwrap();
+
+    db.insert("orders", vec![
+        ("id", DbValue::integer(3)),
+        ("user_id", DbValue::integer(3)),  // 用户 3 不存在
+        ("product", DbValue::text("Notebook")),
+    ]).unwrap();
+
+    // RIGHT JOIN：返回所有订单，包括没有对应客户的订单
+    let results = db.query("users")
+        .right_join("orders", "users.id", "orders.user_id")
+        .select(&["users.name", "orders.product"])
+        .execute()
+        .unwrap();
+
+    // 应该有 3 条订单记录
+    assert_eq!(results.len(), 3);
+
+    // 验证 Notebook 订单的用户名为 NULL（因为用户 3 不存在）
+    let notebook_row = results.iter()
+        .find(|row| row.get("orders.product").unwrap().as_text() == Some("Notebook"))
+        .unwrap();
+    assert!(notebook_row.get("users.name").unwrap().as_text().is_none());
+}
+
+/// 测试 RIGHT JOIN 与索引
+#[test]
+fn test_right_join_with_index() {
+    let db = Database::new();
+
+    // 创建表
+    db.create_table("users", vec![
+        Column::new("id", DataType::integer()),
+        Column::new("name", DataType::text()),
+    ]).unwrap();
+
+    db.create_table("orders", vec![
+        Column::new("id", DataType::integer()),
+        Column::new("user_id", DataType::integer()),
+        Column::new("product", DataType::text()),
+    ]).unwrap();
+
+    // 为 orders.user_id 创建索引
+    db.create_index("orders", "user_id").unwrap();
+
+    // 插入数据
+    db.insert("users", vec![
+        ("id", DbValue::integer(1)),
+        ("name", DbValue::text("Alice")),
+    ]).unwrap();
+
+    db.insert("users", vec![
+        ("id", DbValue::integer(2)),
+        ("name", DbValue::text("Bob")),
+    ]).unwrap();
+
+    db.insert("orders", vec![
+        ("id", DbValue::integer(1)),
+        ("user_id", DbValue::integer(1)),
+        ("product", DbValue::text("Book")),
+    ]).unwrap();
+
+    db.insert("orders", vec![
+        ("id", DbValue::integer(2)),
+        ("user_id", DbValue::integer(3)),  // 用户 3 不存在
+        ("product", DbValue::text("Pen")),
+    ]).unwrap();
+
+    // RIGHT JOIN with index
+    let results = db.query("users")
+        .right_join("orders", "users.id", "orders.user_id")
+        .select(&["users.name", "orders.product"])
+        .execute()
+        .unwrap();
+
+    // 应该有 2 条记录
+    assert_eq!(results.len(), 2);
+
+    // 验证 Pen 订单的用户名为 NULL
+    let pen_row = results.iter()
+        .find(|row| row.get("orders.product").unwrap().as_text() == Some("Pen"))
+        .unwrap();
+    assert!(pen_row.get("users.name").unwrap().as_text().is_none());
+}
+
+/// 测试 FULL OUTER JOIN 基本功能
+#[test]
+fn test_full_outer_join_basic() {
+    let db = Database::new();
+
+    // 创建用户表
+    db.create_table("users", vec![
+        Column::new("id", DataType::integer()),
+        Column::new("name", DataType::text()),
+    ]).unwrap();
+
+    // 创建订单表
+    db.create_table("orders", vec![
+        Column::new("id", DataType::integer()),
+        Column::new("user_id", DataType::integer()),
+        Column::new("product", DataType::text()),
+    ]).unwrap();
+
+    // 插入用户数据（只有 2 个用户）
+    db.insert("users", vec![
+        ("id", DbValue::integer(1)),
+        ("name", DbValue::text("Alice")),
+    ]).unwrap();
+
+    db.insert("users", vec![
+        ("id", DbValue::integer(2)),
+        ("name", DbValue::text("Bob")),
+    ]).unwrap();
+
+    // 插入订单数据（有 3 个订单，其中 user_id=3 不存在，user_id=4 也不存在）
+    db.insert("orders", vec![
+        ("id", DbValue::integer(1)),
+        ("user_id", DbValue::integer(1)),
+        ("product", DbValue::text("Book")),
+    ]).unwrap();
+
+    db.insert("orders", vec![
+        ("id", DbValue::integer(2)),
+        ("user_id", DbValue::integer(1)),
+        ("product", DbValue::text("Pen")),
+    ]).unwrap();
+
+    db.insert("orders", vec![
+        ("id", DbValue::integer(3)),
+        ("user_id", DbValue::integer(3)),  // 用户 3 不存在
+        ("product", DbValue::text("Notebook")),
+    ]).unwrap();
+
+    // FULL OUTER JOIN：返回所有用户和所有订单
+    // Alice 有 2 个订单，Bob 没有订单，订单 3 没有对应用户
+    // 期望：Alice+Book, Alice+Pen, Bob+NULL, NULL+Notebook = 4 条
+    let results = db.query("users")
+        .full_join("orders", "users.id", "orders.user_id")
+        .select(&["users.name", "orders.product"])
+        .execute()
+        .unwrap();
+
+    // 应该有 4 条记录
+    assert_eq!(results.len(), 4);
+
+    // 验证 Bob 的行（用户存在，订单为 NULL）
+    let bob_null_rows: Vec<_> = results.iter()
+        .filter(|row| row.get("users.name").unwrap().as_text() == Some("Bob"))
+        .collect();
+    assert_eq!(bob_null_rows.len(), 1);
+    assert!(bob_null_rows[0].get("orders.product").unwrap().as_text().is_none());
+
+    // 验证 Notebook 订单的行（用户为 NULL，订单存在）
+    let notebook_rows: Vec<_> = results.iter()
+        .filter(|row| row.get("orders.product").unwrap().as_text() == Some("Notebook"))
+        .collect();
+    assert_eq!(notebook_rows.len(), 1);
+    assert!(notebook_rows[0].get("users.name").unwrap().as_text().is_none());
+
+    // 验证 Alice 的订单（用户和订单都存在）
+    let alice_rows: Vec<_> = results.iter()
+        .filter(|row| row.get("users.name").unwrap().as_text() == Some("Alice"))
+        .collect();
+    assert_eq!(alice_rows.len(), 2); // Book 和 Pen
+}
+
+/// 测试 FULL OUTER JOIN 与索引
+#[test]
+fn test_full_outer_join_with_index() {
+    let db = Database::new();
+
+    // 创建表
+    db.create_table("users", vec![
+        Column::new("id", DataType::integer()),
+        Column::new("name", DataType::text()),
+    ]).unwrap();
+
+    db.create_table("orders", vec![
+        Column::new("id", DataType::integer()),
+        Column::new("user_id", DataType::integer()),
+        Column::new("product", DataType::text()),
+    ]).unwrap();
+
+    // 为 orders.user_id 创建索引
+    db.create_index("orders", "user_id").unwrap();
+
+    // 插入数据
+    db.insert("users", vec![
+        ("id", DbValue::integer(1)),
+        ("name", DbValue::text("Alice")),
+    ]).unwrap();
+
+    db.insert("users", vec![
+        ("id", DbValue::integer(2)),
+        ("name", DbValue::text("Bob")),
+    ]).unwrap();
+
+    db.insert("orders", vec![
+        ("id", DbValue::integer(1)),
+        ("user_id", DbValue::integer(1)),
+        ("product", DbValue::text("Book")),
+    ]).unwrap();
+
+    db.insert("orders", vec![
+        ("id", DbValue::integer(2)),
+        ("user_id", DbValue::integer(3)),  // 用户 3 不存在
+        ("product", DbValue::text("Pen")),
+    ]).unwrap();
+
+    // FULL OUTER JOIN with index
+    // 期望：Alice+Book, Bob+NULL, NULL+Pen = 3 条
+    let results = db.query("users")
+        .full_join("orders", "users.id", "orders.user_id")
+        .select(&["users.name", "orders.product"])
+        .execute()
+        .unwrap();
+
+    // 应该有 3 条记录
+    assert_eq!(results.len(), 3);
+
+    // 验证 Bob 的行（用户存在，订单为 NULL）
+    let bob_null_rows: Vec<_> = results.iter()
+        .filter(|row| row.get("users.name").unwrap().as_text() == Some("Bob"))
+        .collect();
+    assert_eq!(bob_null_rows.len(), 1);
+    assert!(bob_null_rows[0].get("orders.product").unwrap().as_text().is_none());
+
+    // 验证 Pen 订单的行（用户为 NULL，订单存在）
+    let pen_rows: Vec<_> = results.iter()
+        .filter(|row| row.get("orders.product").unwrap().as_text() == Some("Pen"))
+        .collect();
+    assert_eq!(pen_rows.len(), 1);
+    assert!(pen_rows[0].get("users.name").unwrap().as_text().is_none());
+}
