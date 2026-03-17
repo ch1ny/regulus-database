@@ -240,6 +240,13 @@ impl MemoryEngine {
         self.indexes.drop_table_indexes(table);
     }
 
+    /// 获取表的行数
+    pub fn get_row_count(&self, table: &str) -> DbResult<usize> {
+        self.tables.get(table)
+            .map(|t| t.rows.len())
+            .ok_or_else(|| DbError::TableNotFound(table.to_string()))
+    }
+
     /// 从索引中删除键值对（用于 delete 操作，单列）
     pub fn remove_from_index(&mut self, table: &str, column: &str, key: &DbValue, row_id: RowId) {
         if let Some(index) = self.indexes.get_index_mut(table, column) {

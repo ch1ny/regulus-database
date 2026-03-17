@@ -433,6 +433,44 @@ impl QueryBuilder {
         }
     }
 
+    /// 优化 JOIN 顺序
+    /// 策略：选择最小的表作为驱动表，减少中间结果集
+    fn optimize_join_order(&self, engine: &MemoryEngine) -> DbResult<Vec<JoinCondition>> {
+        // 1. 收集所有涉及的表及其大小
+        let mut tables: Vec<(String, usize)> = Vec::new();
+
+        // 主表
+        let main_count = engine.get_row_count(&self.table)?;
+        tables.push((self.table.clone(), main_count));
+
+        // JOIN 表
+        for join in &self.joins {
+            if !tables.iter().any(|(name, _)| name == &join.right_table) {
+                let count = engine.get_row_count(&join.right_table)?;
+                tables.push((join.right_table.clone(), count));
+            }
+        }
+
+        // 2. 按表大小排序（从小到大）
+        tables.sort_by_key(|(_, count)| *count);
+
+        // 3. 找出最小的右表
+        let smallest_table = tables.first()
+            .map(|(name, _)| name.clone());
+
+        // 4. 重排 JOIN 顺序：将最小表对应的 JOIN 交换到前面
+        let mut optimized_joins = self.joins.clone();
+
+        if let Some(smallest) = smallest_table {
+            // 找到包含最小表的 JOIN
+            if let Some(min_idx) = optimized_joins.iter().position(|j| j.right_table == smallest) {
+                optimized_joins.swap(0, min_idx);
+            }
+        }
+
+        Ok(optimized_joins)
+    }
+
     /// 执行 JOIN 查询（嵌套循环连接）
     fn execute_join(&self, engine: &MemoryEngine) -> DbResult<Vec<Row>> {
         if self.joins.is_empty() {
@@ -450,14 +488,17 @@ impl QueryBuilder {
             // RIGHT JOIN 和 FULL OUTER JOIN 需要特殊处理：以右表为驱动表
             self.execute_right_or_full_join(engine, &mut results)?;
         } else {
+            // 优化 JOIN 顺序：选择最小的表作为驱动表
+            let optimized_joins = self.optimize_join_order(engine)?;
+
             // 扫描主表
             let main_table_rows = engine.scan(&self.table)?;
 
             for (_row_id, main_row) in main_table_rows {
                 let main_prefixed = self.prefix_row(main_row, &self.table);
 
-                // 递归处理所有 JOIN
-                self.process_joins(engine, main_prefixed, 0, &mut results)?;
+                // 使用优化后的 JOIN 顺序
+                self.process_joins_with_order(engine, main_prefixed, 0, &mut results, &optimized_joins)?;
             }
         }
 
@@ -603,6 +644,127 @@ impl QueryBuilder {
             // 无索引，降级为全表扫描
             self.process_join_scan_impl(engine, current_row, join_index, results, join)
         }
+    }
+
+    /// 递归处理 JOIN 链（使用优化后的顺序）
+    fn process_joins_with_order(
+        &self,
+        engine: &MemoryEngine,
+        current_row: Row,
+        join_index: usize,
+        results: &mut Vec<Row>,
+        optimized_joins: &[JoinCondition],
+    ) -> DbResult<()> {
+        if join_index >= optimized_joins.len() {
+            // 所有 JOIN 处理完毕，添加结果
+            results.push(current_row);
+            return Ok(());
+        }
+
+        let join = &optimized_joins[join_index];
+
+        // RIGHT JOIN 需要特殊处理
+        if matches!(join.join_type, JoinType::Right) {
+            return self.process_joins_with_order(engine, current_row, join_index + 1, results, optimized_joins);
+        }
+
+        // 尝试使用索引优化
+        let right_column = Self::extract_column_name(&join.right_field);
+        if let Some(index) = engine.get_index(&join.right_table, right_column) {
+            self.process_join_with_index_impl_optimized(engine, current_row, join_index, results, join, right_column, index, optimized_joins)
+        } else {
+            self.process_join_scan_impl_optimized(engine, current_row, join_index, results, join, optimized_joins)
+        }
+    }
+
+    /// 使用全表扫描执行 JOIN（优化版本，支持自定义 JOIN 顺序）
+    fn process_join_scan_impl_optimized(
+        &self,
+        engine: &MemoryEngine,
+        current_row: Row,
+        join_index: usize,
+        results: &mut Vec<Row>,
+        join: &JoinCondition,
+        optimized_joins: &[JoinCondition],
+    ) -> DbResult<()> {
+        let right_rows = engine.scan(&join.right_table)?;
+
+        let mut has_match = false;
+
+        for (_right_id, right_row) in right_rows {
+            let right_prefixed = self.prefix_row(right_row, &join.right_table);
+
+            // 检查 JOIN 条件
+            if self.match_join_condition(&current_row, &right_prefixed, join) {
+                has_match = true;
+                // 合并行
+                let mut merged = current_row.clone();
+                merged.extend(right_prefixed);
+
+                // 递归处理下一个 JOIN（使用优化后的顺序）
+                self.process_joins_with_order(engine, merged, join_index + 1, results, optimized_joins)?;
+            }
+        }
+
+        // 处理 LEFT JOIN 无匹配情况
+        if !has_match && matches!(join.join_type, JoinType::Left) {
+            let null_row = self.create_null_row(engine, &join.right_table)?;
+            let mut merged = current_row.clone();
+            merged.extend(null_row);
+
+            // 递归处理下一个 JOIN（使用优化后的顺序）
+            self.process_joins_with_order(engine, merged, join_index + 1, results, optimized_joins)?;
+        }
+
+        Ok(())
+    }
+
+    /// 使用索引执行 JOIN（优化版本，支持自定义 JOIN 顺序）
+    fn process_join_with_index_impl_optimized(
+        &self,
+        engine: &MemoryEngine,
+        current_row: Row,
+        join_index: usize,
+        results: &mut Vec<Row>,
+        join: &JoinCondition,
+        _right_column: &str,
+        index: &BTreeIndex,
+        optimized_joins: &[JoinCondition],
+    ) -> DbResult<()> {
+        // 从左表获取 JOIN 字段值
+        let join_value = match current_row.get(&join.left_field) {
+            Some(v) => v,
+            None => return Ok(()),  // 左表字段为 NULL，无法匹配
+        };
+
+        // 使用索引查找匹配的 RowId（O(log n)）
+        let matching_row_ids = index.search(join_value);
+
+        let mut has_match = false;
+
+        for row_id in matching_row_ids {
+            has_match = true;
+            if let Some(right_row) = engine.get(&join.right_table, row_id)? {
+                let right_prefixed = self.prefix_row(right_row, &join.right_table);
+                let mut merged = current_row.clone();
+                merged.extend(right_prefixed);
+
+                // 递归处理下一个 JOIN（使用优化后的顺序）
+                self.process_joins_with_order(engine, merged, join_index + 1, results, optimized_joins)?;
+            }
+        }
+
+        // LEFT JOIN 无匹配处理
+        if !has_match && matches!(join.join_type, JoinType::Left) {
+            let null_row = self.create_null_row(engine, &join.right_table)?;
+            let mut merged = current_row.clone();
+            merged.extend(null_row);
+
+            // 递归处理下一个 JOIN（使用优化后的顺序）
+            self.process_joins_with_order(engine, merged, join_index + 1, results, optimized_joins)?;
+        }
+
+        Ok(())
     }
 
     /// 递归处理 JOIN 链

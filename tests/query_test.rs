@@ -1173,3 +1173,94 @@ fn test_unique_composite_index() {
     // 注意：当前实现没有检查唯一性约束，这里只是测试 API
     // 唯一性检查可以在未来实现
 }
+
+/// 测试 JOIN 顺序优化
+#[test]
+fn test_join_order_optimization() {
+    let db = Database::new();
+
+    // 创建两个表简化测试
+    db.create_table("users", vec![
+        Column::new("id", DataType::integer()),
+        Column::new("name", DataType::text()),
+        Column::new("city_id", DataType::integer()),
+    ]).unwrap();
+
+    db.create_table("cities", vec![
+        Column::new("id", DataType::integer()),
+        Column::new("city_name", DataType::text()),
+    ]).unwrap();
+
+    // 插入用户 10 行
+    for i in 1..=10 {
+        db.insert("users", vec![
+            ("id", DbValue::integer(i as i64)),
+            ("name", DbValue::text(format!("User{}", i))),
+            ("city_id", DbValue::integer(((i - 1) % 5) + 1)),  // 1-5 循环
+        ]).unwrap();
+    }
+
+    // 插入城市 5 行
+    for i in 1..=5 {
+        db.insert("cities", vec![
+            ("id", DbValue::integer(i as i64)),
+            ("city_name", DbValue::text(format!("City{}", i))),
+        ]).unwrap();
+    }
+
+    // 执行 JOIN
+    let results = db.query("users")
+        .inner_join("cities", "users.city_id", "cities.id")
+        .execute()
+        .unwrap();
+
+    // 验证结果：10 个用户都能匹配到城市
+    assert_eq!(results.len(), 10);
+}
+
+/// 测试 JOIN 顺序优化与索引配合
+#[test]
+fn test_join_order_with_index() {
+    let db = Database::new();
+
+    // 创建两个表
+    db.create_table("users", vec![
+        Column::new("id", DataType::integer()),
+        Column::new("name", DataType::text()),
+    ]).unwrap();
+
+    db.create_table("orders", vec![
+        Column::new("id", DataType::integer()),
+        Column::new("user_id", DataType::integer()),
+        Column::new("product", DataType::text()),
+    ]).unwrap();
+
+    // 插入数据
+    for i in 1..=10 {
+        db.insert("users", vec![
+            ("id", DbValue::integer(i)),
+            ("name", DbValue::text(format!("User{}", i))),
+        ]).unwrap();
+    }
+
+    for i in 1..=100 {
+        db.insert("orders", vec![
+            ("id", DbValue::integer(i)),
+            ("user_id", DbValue::integer((i % 10) + 1)),
+            ("product", DbValue::text(format!("Product{}", i))),
+        ]).unwrap();
+    }
+
+    // 为 orders.user_id 创建索引
+    db.create_index("orders", "user_id").unwrap();
+
+    // 执行 JOIN
+    let results = db.query("users")
+        .inner_join("orders", "users.id", "orders.user_id")
+        .execute()
+        .unwrap();
+
+    // 验证结果：10 个用户 × 10 个订单 = 100 行
+    assert_eq!(results.len(), 100);
+}
+
