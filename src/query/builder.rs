@@ -40,6 +40,8 @@ pub enum FilterExpr {
     Ge { field: String, value: DbValue },
     In { field: String, values: Vec<DbValue> },
     Contains { field: String, value: String },
+    IsNull { field: String },
+    IsNotNull { field: String },
     And(Box<FilterExpr>, Box<FilterExpr>),
     Or(Box<FilterExpr>, Box<FilterExpr>),
     Not(Box<FilterExpr>),
@@ -96,6 +98,12 @@ fn evaluate_filter(expr: &FilterExpr, row: &Row) -> bool {
                 .map(|s| s.contains(value))
                 .unwrap_or(false)
         }
+        FilterExpr::IsNull { field } => {
+            !row.contains_key(field)
+        }
+        FilterExpr::IsNotNull { field } => {
+            row.contains_key(field)
+        }
         FilterExpr::And(left, right) => {
             evaluate_filter(left, row) && evaluate_filter(right, row)
         }
@@ -147,6 +155,7 @@ pub struct QueryBuilder {
     aggregate: Option<AggregateExpr>,    // 聚合函数
     group_by: Vec<String>,               // GROUP BY 字段
     having: Option<HavingExpr>,          // HAVING 子句
+    distinct: bool,                      // DISTINCT 去重标志
 }
 
 impl QueryBuilder {
@@ -163,6 +172,7 @@ impl QueryBuilder {
             aggregate: None,
             group_by: Vec::new(),
             having: None,
+            distinct: false,
         }
     }
 
@@ -403,6 +413,60 @@ impl QueryBuilder {
         row.iter()
             .map(|(k, v)| (format!("{}.{}", table, k), v.clone()))
             .collect::<Row>()
+    }
+
+    /// DISTINCT 去重：根据 selected_columns 对行进行去重
+    /// 如果 selected_columns 为空，则对所有列去重
+    fn deduplicate_rows(&self, rows: Vec<Row>) -> Vec<Row> {
+        use std::collections::HashSet;
+
+        // 确定用于去重的列索引
+        let dedup_column_indices: Option<Vec<usize>> = if self.selected_columns.is_empty() {
+            None // 使用所有列
+        } else {
+            // 获取第一行的列名用于映射
+            rows.first().map(|first_row| {
+                let all_columns: Vec<&String> = first_row.iter().map(|(k, _)| k).collect();
+                self.selected_columns.iter()
+                    .map(|sel| {
+                        // 尝试找到匹配的列索引
+                        all_columns.iter().position(|col| {
+                            col.as_str() == sel.as_str() ||
+                            col.ends_with(&format!(".{}", sel)) ||
+                            (sel.contains('.') && col.as_str() == sel.as_str())
+                        }).unwrap_or(0)
+                    })
+                    .collect()
+            })
+        };
+
+        let mut seen = HashSet::new();
+        let mut result = Vec::new();
+
+        for row in rows {
+            // 构建去重键
+            let key: Vec<&DbValue> = match &dedup_column_indices {
+                Some(indices) => {
+                    indices.iter()
+                        .filter_map(|&i| row.iter().nth(i).map(|(_, v)| v))
+                        .collect()
+                }
+                None => {
+                    row.iter().map(|(_, v)| v).collect()
+                }
+            };
+
+            // 使用序列化的键进行去重
+            let serialized_key: Vec<String> = key.iter()
+                .map(|v| format!("{:?}", v))
+                .collect();
+
+            if seen.insert(serialized_key) {
+                result.push(row);
+            }
+        }
+
+        result
     }
 
     /// 创建 NULL 行（用于 LEFT/RIGHT JOIN 无匹配时）
@@ -997,6 +1061,22 @@ impl QueryBuilder {
         self
     }
 
+    /// IS NULL 条件：查询字段为 NULL 的行
+    pub fn is_null(mut self, field: &str) -> Self {
+        self.filters.push(FilterExpr::IsNull {
+            field: field.to_string(),
+        });
+        self
+    }
+
+    /// IS NOT NULL 条件：查询字段不为 NULL 的行
+    pub fn is_not_null(mut self, field: &str) -> Self {
+        self.filters.push(FilterExpr::IsNotNull {
+            field: field.to_string(),
+        });
+        self
+    }
+
     // 逻辑组合
     pub fn and(mut self, other: QueryBuilder) -> Self {
         // 合并另一个 QueryBuilder 的过滤条件
@@ -1004,6 +1084,183 @@ impl QueryBuilder {
             self.filters.push(filter);
         }
         self
+    }
+
+    /// OR 条件：将两个过滤条件用 OR 连接
+    ///
+    /// # 示例
+    ///
+    /// 忽略编译的示例，完整代码请参见测试文件：
+    /// ```rust,no_run
+    /// # use regulus_db::{Database, DbValue, FilterExpr};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = Database::new();
+    /// // 查询 age > 18 OR status = 'vip' 的用户
+    /// db.query("users")
+    ///     .or(
+    ///         FilterExpr::Gt { field: "age".to_string(), value: DbValue::integer(18) },
+    ///         FilterExpr::Eq { field: "status".to_string(), value: DbValue::text("vip") }
+    ///     )
+    ///     .execute()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn or(mut self, left: FilterExpr, right: FilterExpr) -> Self {
+        self.filters.push(FilterExpr::Or(Box::new(left), Box::new(right)));
+        self
+    }
+
+    /// NOT 条件：对一个过滤条件取反
+    ///
+    /// # 示例
+    ///
+    /// 简单条件 - 只对下一个条件生效：
+    /// ```rust,no_run
+    /// # use regulus_db::{Database, DbValue};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = Database::new();
+    /// // 查询 age != 18 的用户
+    /// db.query("users")
+    ///     .not()
+    ///     .eq("age", DbValue::integer(18))
+    ///     .execute()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// 复杂条件 - 使用 expr() 传入 FilterExpr：
+    /// ```rust,no_run
+    /// # use regulus_db::{Database, DbValue, FilterExpr};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = Database::new();
+    /// // 查询 NOT (age > 18 AND status = 'active')
+    /// db.query("users")
+    ///     .not()
+    ///     .expr(FilterExpr::And(
+    ///         Box::new(FilterExpr::Gt { field: "age".to_string(), value: DbValue::integer(18) }),
+    ///         Box::new(FilterExpr::Eq { field: "status".to_string(), value: DbValue::text("active") })
+    ///     ))
+    ///     .execute()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn not(self) -> NotBuilder {
+        NotBuilder { query: self }
+    }
+
+    /// 添加任意过滤表达式
+    ///
+    /// # 示例
+    ///
+    /// 忽略编译的示例，完整代码请参见测试文件：
+    /// ```rust,no_run
+    /// # use regulus_db::{Database, DbValue, FilterExpr};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = Database::new();
+    /// // 添加 OR 条件
+    /// db.query("users")
+    ///     .where_expr(FilterExpr::Or(
+    ///         Box::new(FilterExpr::Gt { field: "age".to_string(), value: DbValue::integer(18) }),
+    ///         Box::new(FilterExpr::Eq { field: "status".to_string(), value: DbValue::text("vip") })
+    ///     ))
+    ///     .execute()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn where_expr(mut self, expr: FilterExpr) -> Self {
+        self.filters.push(expr);
+        self
+    }
+
+    /// 构建 OR 条件（便捷方法）
+    ///
+    /// # 示例
+    ///
+    /// 忽略编译的示例，完整代码请参见测试文件：
+    /// ```rust,no_run
+    /// # use regulus_db::{Database, DbValue};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = Database::new();
+    /// // 查询 age > 18 OR age < 10 的用户
+    /// db.query("users")
+    ///     .or_simple(|q| q.gt("age", DbValue::integer(18)), |q| q.lt("age", DbValue::integer(10)))
+    ///     .execute()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn or_simple<F1, F2>(self, left_builder: F1, right_builder: F2) -> Self
+    where
+        F1: FnOnce(QueryBuilder) -> QueryBuilder,
+        F2: FnOnce(QueryBuilder) -> QueryBuilder,
+    {
+        // 构建左边的条件
+        let left_qb = left_builder(QueryBuilder::new(self.table.clone(), Arc::clone(&self.engine)));
+        // 构建右边的条件
+        let right_qb = right_builder(QueryBuilder::new(self.table.clone(), Arc::clone(&self.engine)));
+
+        // 合并左右条件为 OR
+        let left_filters: Vec<FilterExpr> = left_qb.filters;
+        let right_filters: Vec<FilterExpr> = right_qb.filters;
+
+        // 将多个 filters 用 AND 连接
+        let left_expr = left_filters.into_iter().reduce(|a, b| FilterExpr::And(Box::new(a), Box::new(b)));
+        let right_expr = right_filters.into_iter().reduce(|a, b| FilterExpr::And(Box::new(a), Box::new(b)));
+
+        match (left_expr, right_expr) {
+            (Some(left), Some(right)) => {
+                let mut new_self = self;
+                new_self.filters.push(FilterExpr::Or(Box::new(left), Box::new(right)));
+                new_self
+            }
+            (Some(left), None) => {
+                let mut new_self = self;
+                new_self.filters.push(left);
+                new_self
+            }
+            (None, Some(right)) => {
+                let mut new_self = self;
+                new_self.filters.push(right);
+                new_self
+            }
+            (None, None) => self,
+        }
+    }
+
+    /// 构建 NOT 条件（便捷方法）
+    ///
+    /// # 示例
+    ///
+    /// 忽略编译的示例，完整代码请参见测试文件：
+    /// ```rust,no_run
+    /// # use regulus_db::{Database, DbValue};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = Database::new();
+    /// // 查询 status != 'deleted' 的用户
+    /// db.query("users")
+    ///     .not_simple(|q| q.eq("status", DbValue::text("deleted")))
+    ///     .execute()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn not_simple<F>(self, builder: F) -> Self
+    where
+        F: FnOnce(QueryBuilder) -> QueryBuilder,
+    {
+        // 构建内部条件
+        let inner_qb = builder(QueryBuilder::new(self.table.clone(), Arc::clone(&self.engine)));
+        let inner_filters: Vec<FilterExpr> = inner_qb.filters;
+
+        // 将多个 filter 用 AND 连接
+        let inner_expr = inner_filters.into_iter().reduce(|a, b| FilterExpr::And(Box::new(a), Box::new(b)));
+
+        match inner_expr {
+            Some(expr) => {
+                let mut new_self = self;
+                new_self.filters.push(FilterExpr::Not(Box::new(expr)));
+                new_self
+            }
+            None => self,
+        }
     }
 
     // 排序
@@ -1140,6 +1397,28 @@ impl QueryBuilder {
         self
     }
 
+    // ==================== DISTINCT ====================
+
+    /// SELECT DISTINCT - 去重查询
+    ///
+    /// # 示例
+    /// ```rust,no_run
+    /// # use regulus_db::{Database, DbValue};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = Database::new();
+    /// // 查询所有不同的部门
+    /// db.query("employees")
+    ///     .select(&["department"])
+    ///     .distinct()
+    ///     .execute()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn distinct(mut self) -> Self {
+        self.distinct = true;
+        self
+    }
+
     // ==================== GROUP BY 和 HAVING ====================
 
     /// GROUP BY 子句
@@ -1221,6 +1500,11 @@ impl QueryBuilder {
             })
             .map(|(_, row)| row.clone())
             .collect();
+
+        // DISTINCT 去重
+        if self.distinct {
+            filtered = self.deduplicate_rows(filtered);
+        }
 
         // 排序
         if let Some((ref field, order)) = self.order_by {
@@ -1768,5 +2052,116 @@ impl DeleteBuilder {
         }
 
         Ok(count)
+    }
+}
+
+/// NOT 构建器 - 用于对单个过滤条件取反
+///
+/// 通过 `QueryBuilder::not()` 创建，提供所有过滤条件方法
+/// 调用任意过滤方法会将生成的表达式用 `Not` 包裹后添加到查询中
+pub struct NotBuilder {
+    query: QueryBuilder,
+}
+
+impl NotBuilder {
+    /// 添加任意过滤表达式（复杂场景）
+    ///
+    /// # 示例
+    /// ```rust,no_run
+    /// # use regulus_db::{Database, DbValue, FilterExpr};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = Database::new();
+    /// // 查询 NOT (age > 18 AND status = 'active')
+    /// db.query("users")
+    ///     .not()
+    ///     .expr(FilterExpr::And(
+    ///         Box::new(FilterExpr::Gt { field: "age".to_string(), value: DbValue::integer(18) }),
+    ///         Box::new(FilterExpr::Eq { field: "status".to_string(), value: DbValue::text("active") })
+    ///     ))
+    ///     .execute()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn expr(mut self, expr: FilterExpr) -> QueryBuilder {
+        self.query.filters.push(FilterExpr::Not(Box::new(expr)));
+        self.query
+    }
+
+    /// EQ 取反：不等于 (!=)
+    pub fn eq(self, field: &str, value: DbValue) -> QueryBuilder {
+        self.expr(FilterExpr::Eq {
+            field: field.to_string(),
+            value,
+        })
+    }
+
+    /// NE 取反：等于 (=)
+    pub fn ne(self, field: &str, value: DbValue) -> QueryBuilder {
+        self.expr(FilterExpr::Ne {
+            field: field.to_string(),
+            value,
+        })
+    }
+
+    /// LT 取反：大于等于 (>=)
+    pub fn lt(self, field: &str, value: DbValue) -> QueryBuilder {
+        self.expr(FilterExpr::Lt {
+            field: field.to_string(),
+            value,
+        })
+    }
+
+    /// LE 取反：大于 (>)
+    pub fn le(self, field: &str, value: DbValue) -> QueryBuilder {
+        self.expr(FilterExpr::Le {
+            field: field.to_string(),
+            value,
+        })
+    }
+
+    /// GT 取反：小于等于 (<=)
+    pub fn gt(self, field: &str, value: DbValue) -> QueryBuilder {
+        self.expr(FilterExpr::Gt {
+            field: field.to_string(),
+            value,
+        })
+    }
+
+    /// GE 取反：小于 (<)
+    pub fn ge(self, field: &str, value: DbValue) -> QueryBuilder {
+        self.expr(FilterExpr::Ge {
+            field: field.to_string(),
+            value,
+        })
+    }
+
+    /// IN 取反：NOT IN
+    pub fn in_list(self, field: &str, values: Vec<DbValue>) -> QueryBuilder {
+        self.expr(FilterExpr::In {
+            field: field.to_string(),
+            values,
+        })
+    }
+
+    /// CONTAINS 取反：NOT LIKE
+    pub fn contains(self, field: &str, value: &str) -> QueryBuilder {
+        self.expr(FilterExpr::Contains {
+            field: field.to_string(),
+            value: value.to_string(),
+        })
+    }
+
+    /// IS NULL 取反：IS NOT NULL
+    pub fn is_null(self, field: &str) -> QueryBuilder {
+        self.expr(FilterExpr::IsNull {
+            field: field.to_string(),
+        })
+    }
+
+    /// IS NOT NULL 取反：IS NULL
+    pub fn is_not_null(self, field: &str) -> QueryBuilder {
+        self.expr(FilterExpr::IsNotNull {
+            field: field.to_string(),
+        })
     }
 }
