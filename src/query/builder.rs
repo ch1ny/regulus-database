@@ -40,6 +40,8 @@ pub enum FilterExpr {
     Ge { field: String, value: DbValue },
     In { field: String, values: Vec<DbValue> },
     Contains { field: String, value: String },
+    IsNull { field: String },
+    IsNotNull { field: String },
     And(Box<FilterExpr>, Box<FilterExpr>),
     Or(Box<FilterExpr>, Box<FilterExpr>),
     Not(Box<FilterExpr>),
@@ -95,6 +97,12 @@ fn evaluate_filter(expr: &FilterExpr, row: &Row) -> bool {
                 .and_then(|v| v.as_text())
                 .map(|s| s.contains(value))
                 .unwrap_or(false)
+        }
+        FilterExpr::IsNull { field } => {
+            !row.contains_key(field)
+        }
+        FilterExpr::IsNotNull { field } => {
+            row.contains_key(field)
         }
         FilterExpr::And(left, right) => {
             evaluate_filter(left, row) && evaluate_filter(right, row)
@@ -1049,6 +1057,22 @@ impl QueryBuilder {
         self.filters.push(FilterExpr::Contains {
             field: field.to_string(),
             value: value.to_string(),
+        });
+        self
+    }
+
+    /// IS NULL 条件：查询字段为 NULL 的行
+    pub fn is_null(mut self, field: &str) -> Self {
+        self.filters.push(FilterExpr::IsNull {
+            field: field.to_string(),
+        });
+        self
+    }
+
+    /// IS NOT NULL 条件：查询字段不为 NULL 的行
+    pub fn is_not_null(mut self, field: &str) -> Self {
+        self.filters.push(FilterExpr::IsNotNull {
+            field: field.to_string(),
         });
         self
     }

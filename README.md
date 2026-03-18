@@ -166,6 +166,8 @@ db.query("users").gt("age", DbValue::integer(18));    // >
 db.query("users").ge("age", DbValue::integer(18));    // >=
 db.query("users").in_list("id", vec![DbValue::integer(1), DbValue::integer(2)]);  // IN
 db.query("users").contains("name", "Ali");            // LIKE (包含)
+db.query("users").is_null("email");                   // IS NULL
+db.query("users").is_not_null("email");               // IS NOT NULL
 ```
 
 ### 逻辑操作符
