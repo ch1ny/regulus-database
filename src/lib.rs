@@ -130,6 +130,9 @@ impl Database {
             row.insert(name.to_string(), value);
         }
 
+        // 填充默认值
+        schema.fill_defaults(&mut row);
+
         // 验证 schema
         let values_ref: Vec<(String, DbValue)> = row.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         schema.validate(&values_ref)?;
@@ -447,5 +450,56 @@ mod tests {
             }
             _ => {}
         }
+    }
+
+    #[test]
+    fn test_insert_with_default_values() {
+        let db = Database::new();
+        let columns = vec![
+            Column::new("id", DataType::integer()).primary_key(),
+            Column::new("name", DataType::text()).not_null(),
+            Column::new("status", DataType::text()).default(DbValue::text("active")),
+            Column::new("age", DataType::integer()).default(DbValue::integer(0)),
+            Column::new("active", DataType::boolean()).default(DbValue::boolean(true)),
+        ];
+        db.create_table("users", columns).unwrap();
+
+        // 只插入部分字段，依赖默认值
+        db.insert("users", vec![
+            ("id", DbValue::integer(1)),
+            ("name", DbValue::text("Alice")),
+        ]).unwrap();
+
+        // 验证默认值已填充
+        let row = db.query("users").eq("id", DbValue::integer(1)).execute().unwrap();
+        assert_eq!(row.len(), 1);
+        assert_eq!(row[0].get("status").unwrap().as_text(), Some("active"));
+        assert_eq!(row[0].get("age").unwrap().as_integer(), Some(0));
+        assert_eq!(row[0].get("active").unwrap().as_boolean(), Some(true));
+    }
+
+    #[test]
+    fn test_transaction_insert_with_default_values() {
+        let db = Database::new();
+        let columns = vec![
+            Column::new("id", DataType::integer()).primary_key(),
+            Column::new("name", DataType::text()).not_null(),
+            Column::new("status", DataType::text()).default(DbValue::text("active")),
+        ];
+        db.create_table("users", columns).unwrap();
+
+        // 在事务中插入，依赖默认值
+        db.transaction(|tx| {
+            tx.insert("users", vec![
+                ("id", DbValue::integer(1)),
+                ("name", DbValue::text("Alice")),
+            ])?;
+            Ok(())
+        }).unwrap();
+
+        // 验证默认值已填充
+        let row = db.query("users").eq("id", DbValue::integer(1)).execute().unwrap();
+        assert_eq!(row.len(), 1);
+        assert_eq!(row[0].get("status").unwrap().as_text(), Some("active"));
     }
 }

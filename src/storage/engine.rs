@@ -444,11 +444,14 @@ impl StorageEngine for MemoryEngine {
             .map(|table| table.schema.clone())
     }
 
-    fn insert(&mut self, table: &str, row: Row) -> DbResult<RowId> {
+    fn insert(&mut self, table: &str, mut row: Row) -> DbResult<RowId> {
         let tbl = self
             .tables
             .get_mut(table)
             .ok_or_else(|| DbError::TableNotFound(table.to_string()))?;
+
+        // 填充默认值
+        tbl.schema.fill_defaults(&mut row);
 
         // 验证 schema
         let values: Vec<(String, DbValue)> = row.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
@@ -748,5 +751,60 @@ mod tests {
 
         let rows = engine.scan("users").unwrap();
         assert_eq!(rows.len(), 3);
+    }
+
+    #[test]
+    fn test_insert_with_default_values() {
+        let mut engine = MemoryEngine::new();
+        let schema = TableSchema::new(
+            "users",
+            vec![
+                Column::new("id", DataType::integer()).primary_key(),
+                Column::new("name", DataType::text()).not_null(),
+                Column::new("status", DataType::text()).default(DbValue::text("active")),
+                Column::new("age", DataType::integer()).default(DbValue::integer(0)),
+                Column::new("active", DataType::boolean()).default(DbValue::boolean(true)),
+            ],
+        );
+        engine.create_table(schema).unwrap();
+
+        // 只插入部分字段，依赖默认值
+        let mut row = Row::new();
+        row.insert("id".to_string(), DbValue::integer(1));
+        row.insert("name".to_string(), DbValue::text("Alice"));
+
+        let row_id = engine.insert("users", row).unwrap();
+
+        // 验证默认值已填充
+        let retrieved = engine.get("users", row_id).unwrap().unwrap();
+        assert_eq!(retrieved.get("status").unwrap().as_text(), Some("active"));
+        assert_eq!(retrieved.get("age").unwrap().as_integer(), Some(0));
+        assert_eq!(retrieved.get("active").unwrap().as_boolean(), Some(true));
+    }
+
+    #[test]
+    fn test_insert_with_explicit_value_overrides_default() {
+        let mut engine = MemoryEngine::new();
+        let schema = TableSchema::new(
+            "users",
+            vec![
+                Column::new("id", DataType::integer()).primary_key(),
+                Column::new("name", DataType::text()).not_null(),
+                Column::new("status", DataType::text()).default(DbValue::text("active")),
+            ],
+        );
+        engine.create_table(schema).unwrap();
+
+        // 显式提供 status 值
+        let mut row = Row::new();
+        row.insert("id".to_string(), DbValue::integer(1));
+        row.insert("name".to_string(), DbValue::text("Bob"));
+        row.insert("status".to_string(), DbValue::text("inactive"));
+
+        let row_id = engine.insert("users", row).unwrap();
+
+        // 验证显式值未被默认值覆盖
+        let retrieved = engine.get("users", row_id).unwrap().unwrap();
+        assert_eq!(retrieved.get("status").unwrap().as_text(), Some("inactive"));
     }
 }
