@@ -111,6 +111,7 @@ pub struct Table {
     pub schema: TableSchema,
     pub rows: HashMap<RowId, Row>,
     pub next_row_id: u64,
+    pub next_autoincrement: i64,
 }
 
 impl Table {
@@ -119,6 +120,7 @@ impl Table {
             schema,
             rows: HashMap::new(),
             next_row_id: 0,
+            next_autoincrement: 1,
         }
     }
 
@@ -450,12 +452,59 @@ impl StorageEngine for MemoryEngine {
             .get_mut(table)
             .ok_or_else(|| DbError::TableNotFound(table.to_string()))?;
 
+        // 检查是否有自增列，如果有且用户未提供值，则自动生成
+        if let Some(auto_col) = tbl.schema.auto_increment_column() {
+            if !row.contains_key(&auto_col.name) {
+                // 需要生成自增值
+                let next_val = tbl.next_autoincrement;
+                row.insert(auto_col.name.clone(), DbValue::integer(next_val));
+                tbl.next_autoincrement = next_val + 1;
+            } else {
+                // 用户显式提供了值，更新 next_autoincrement 为最大值 + 1
+                if let Some(DbValue::Integer(user_val)) = row.get(&auto_col.name) {
+                    tbl.next_autoincrement = tbl.next_autoincrement.max(*user_val + 1);
+                }
+            }
+        }
+
         // 填充默认值
         tbl.schema.fill_defaults(&mut row);
 
         // 验证 schema
         let values: Vec<(String, DbValue)> = row.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         tbl.schema.validate(&values)?;
+
+        // 检查主键和唯一约束
+        for column in &tbl.schema.columns {
+            if let Some(value) = row.get(&column.name) {
+                // 检查主键唯一性
+                if column.primary_key {
+                    for (_, existing_row) in tbl.iter() {
+                        if let Some(existing_val) = existing_row.get(&column.name) {
+                            if existing_val == value {
+                                return Err(DbError::SchemaError(SchemaError::PrimaryKeyViolation {
+                                    table: table.to_string(),
+                                    column: column.name.clone(),
+                                }));
+                            }
+                        }
+                    }
+                }
+                // 检查唯一约束
+                if column.unique && !column.primary_key {
+                    for (_, existing_row) in tbl.iter() {
+                        if let Some(existing_val) = existing_row.get(&column.name) {
+                            if existing_val == value {
+                                return Err(DbError::SchemaError(SchemaError::UniqueViolation {
+                                    table: table.to_string(),
+                                    column: column.name.clone(),
+                                }));
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // 先获取需要索引的列和值（在插入之前）
         let index_metas: Vec<&IndexMeta> = self.indexes.get_table_indexes(table);

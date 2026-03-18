@@ -106,6 +106,7 @@ pub struct Column {
     pub primary_key: bool,
     pub unique: bool,
     pub default_value: Option<DbValue>,
+    pub auto_increment: bool,
 }
 
 impl Column {
@@ -117,6 +118,7 @@ impl Column {
             primary_key: false,
             unique: false,
             default_value: None,
+            auto_increment: false,
         }
     }
 
@@ -138,6 +140,11 @@ impl Column {
 
     pub fn default(mut self, value: DbValue) -> Self {
         self.default_value = Some(value);
+        self
+    }
+
+    pub fn auto_increment(mut self) -> Self {
+        self.auto_increment = true;
         self
     }
 }
@@ -170,6 +177,11 @@ impl TableSchema {
     /// 获取主键列
     pub fn primary_key(&self) -> Option<&Column> {
         self.columns.iter().find(|c| c.primary_key)
+    }
+
+    /// 获取自增列
+    pub fn auto_increment_column(&self) -> Option<&Column> {
+        self.columns.iter().find(|c| c.auto_increment)
     }
 
     /// 填充行的默认值
@@ -232,6 +244,12 @@ pub enum SchemaError {
 
     #[error("NOT NULL constraint failed for column '{column}' in table '{table}'")]
     NotNullViolation { table: String, column: String },
+
+    #[error("UNIQUE constraint failed for column '{column}' in table '{table}'")]
+    UniqueViolation { table: String, column: String },
+
+    #[error("PRIMARY KEY constraint failed for column '{column}' in table '{table}'")]
+    PrimaryKeyViolation { table: String, column: String },
 }
 
 #[cfg(test)]
