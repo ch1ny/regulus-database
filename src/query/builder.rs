@@ -1006,6 +1006,166 @@ impl QueryBuilder {
         self
     }
 
+    /// OR 条件：将两个过滤条件用 OR 连接
+    ///
+    /// # 示例
+    ///
+    /// 忽略编译的示例，完整代码请参见测试文件：
+    /// ```rust,no_run
+    /// # use regulus_db::{Database, DbValue, FilterExpr};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = Database::new();
+    /// // 查询 age > 18 OR status = 'vip' 的用户
+    /// db.query("users")
+    ///     .or(
+    ///         FilterExpr::Gt { field: "age".to_string(), value: DbValue::integer(18) },
+    ///         FilterExpr::Eq { field: "status".to_string(), value: DbValue::text("vip") }
+    ///     )
+    ///     .execute()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn or(mut self, left: FilterExpr, right: FilterExpr) -> Self {
+        self.filters.push(FilterExpr::Or(Box::new(left), Box::new(right)));
+        self
+    }
+
+    /// NOT 条件：对一个过滤条件取反
+    ///
+    /// # 示例
+    ///
+    /// 忽略编译的示例，完整代码请参见测试文件：
+    /// ```rust,no_run
+    /// # use regulus_db::{Database, DbValue, FilterExpr};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = Database::new();
+    /// // 查询 status != 'deleted' 的用户
+    /// db.query("users")
+    ///     .not(FilterExpr::Eq { field: "status".to_string(), value: DbValue::text("deleted") })
+    ///     .execute()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn not(mut self, expr: FilterExpr) -> Self {
+        self.filters.push(FilterExpr::Not(Box::new(expr)));
+        self
+    }
+
+    /// 添加任意过滤表达式
+    ///
+    /// # 示例
+    ///
+    /// 忽略编译的示例，完整代码请参见测试文件：
+    /// ```rust,no_run
+    /// # use regulus_db::{Database, DbValue, FilterExpr};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = Database::new();
+    /// // 添加 OR 条件
+    /// db.query("users")
+    ///     .where_expr(FilterExpr::Or(
+    ///         Box::new(FilterExpr::Gt { field: "age".to_string(), value: DbValue::integer(18) }),
+    ///         Box::new(FilterExpr::Eq { field: "status".to_string(), value: DbValue::text("vip") })
+    ///     ))
+    ///     .execute()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn where_expr(mut self, expr: FilterExpr) -> Self {
+        self.filters.push(expr);
+        self
+    }
+
+    /// 构建 OR 条件（便捷方法）
+    ///
+    /// # 示例
+    ///
+    /// 忽略编译的示例，完整代码请参见测试文件：
+    /// ```rust,no_run
+    /// # use regulus_db::{Database, DbValue};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = Database::new();
+    /// // 查询 age > 18 OR age < 10 的用户
+    /// db.query("users")
+    ///     .or_simple(|q| q.gt("age", DbValue::integer(18)), |q| q.lt("age", DbValue::integer(10)))
+    ///     .execute()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn or_simple<F1, F2>(self, left_builder: F1, right_builder: F2) -> Self
+    where
+        F1: FnOnce(QueryBuilder) -> QueryBuilder,
+        F2: FnOnce(QueryBuilder) -> QueryBuilder,
+    {
+        // 构建左边的条件
+        let left_qb = left_builder(QueryBuilder::new(self.table.clone(), Arc::clone(&self.engine)));
+        // 构建右边的条件
+        let right_qb = right_builder(QueryBuilder::new(self.table.clone(), Arc::clone(&self.engine)));
+
+        // 合并左右条件为 OR
+        let left_filters: Vec<FilterExpr> = left_qb.filters;
+        let right_filters: Vec<FilterExpr> = right_qb.filters;
+
+        // 将多个 filters 用 AND 连接
+        let left_expr = left_filters.into_iter().reduce(|a, b| FilterExpr::And(Box::new(a), Box::new(b)));
+        let right_expr = right_filters.into_iter().reduce(|a, b| FilterExpr::And(Box::new(a), Box::new(b)));
+
+        match (left_expr, right_expr) {
+            (Some(left), Some(right)) => {
+                let mut new_self = self;
+                new_self.filters.push(FilterExpr::Or(Box::new(left), Box::new(right)));
+                new_self
+            }
+            (Some(left), None) => {
+                let mut new_self = self;
+                new_self.filters.push(left);
+                new_self
+            }
+            (None, Some(right)) => {
+                let mut new_self = self;
+                new_self.filters.push(right);
+                new_self
+            }
+            (None, None) => self,
+        }
+    }
+
+    /// 构建 NOT 条件（便捷方法）
+    ///
+    /// # 示例
+    ///
+    /// 忽略编译的示例，完整代码请参见测试文件：
+    /// ```rust,no_run
+    /// # use regulus_db::{Database, DbValue};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = Database::new();
+    /// // 查询 status != 'deleted' 的用户
+    /// db.query("users")
+    ///     .not_simple(|q| q.eq("status", DbValue::text("deleted")))
+    ///     .execute()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn not_simple<F>(self, builder: F) -> Self
+    where
+        F: FnOnce(QueryBuilder) -> QueryBuilder,
+    {
+        // 构建内部条件
+        let inner_qb = builder(QueryBuilder::new(self.table.clone(), Arc::clone(&self.engine)));
+        let inner_filters: Vec<FilterExpr> = inner_qb.filters;
+
+        // 将多个 filter 用 AND 连接
+        let inner_expr = inner_filters.into_iter().reduce(|a, b| FilterExpr::And(Box::new(a), Box::new(b)));
+
+        match inner_expr {
+            Some(expr) => {
+                let mut new_self = self;
+                new_self.filters.push(FilterExpr::Not(Box::new(expr)));
+                new_self
+            }
+            None => self,
+        }
+    }
+
     // 排序
     pub fn order_by(mut self, field: &str, order: Order) -> Self {
         self.order_by = Some((field.to_string(), order));

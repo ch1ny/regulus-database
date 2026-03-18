@@ -13,7 +13,7 @@ pub mod persistence;
 
 pub use types::{DbValue, DataType, Column, TableSchema, DbError, DbResult};
 pub use storage::{MemoryEngine, PersistedEngine, StorageEngine, Row, RowId};
-pub use query::{QueryBuilder, UpdateBuilder, DeleteBuilder, Order, JoinType};
+pub use query::{QueryBuilder, UpdateBuilder, DeleteBuilder, Order, JoinType, FilterExpr};
 pub use transaction::Transaction;
 
 use std::sync::{Arc, RwLock};
