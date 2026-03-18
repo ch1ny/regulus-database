@@ -1114,21 +1114,38 @@ impl QueryBuilder {
     ///
     /// # 示例
     ///
-    /// 忽略编译的示例，完整代码请参见测试文件：
+    /// 简单条件 - 只对下一个条件生效：
     /// ```rust,no_run
-    /// # use regulus_db::{Database, DbValue, FilterExpr};
+    /// # use regulus_db::{Database, DbValue};
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let db = Database::new();
-    /// // 查询 status != 'deleted' 的用户
+    /// // 查询 age != 18 的用户
     /// db.query("users")
-    ///     .not(FilterExpr::Eq { field: "status".to_string(), value: DbValue::text("deleted") })
+    ///     .not()
+    ///     .eq("age", DbValue::integer(18))
     ///     .execute()?;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn not(mut self, expr: FilterExpr) -> Self {
-        self.filters.push(FilterExpr::Not(Box::new(expr)));
-        self
+    ///
+    /// 复杂条件 - 使用 expr() 传入 FilterExpr：
+    /// ```rust,no_run
+    /// # use regulus_db::{Database, DbValue, FilterExpr};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = Database::new();
+    /// // 查询 NOT (age > 18 AND status = 'active')
+    /// db.query("users")
+    ///     .not()
+    ///     .expr(FilterExpr::And(
+    ///         Box::new(FilterExpr::Gt { field: "age".to_string(), value: DbValue::integer(18) }),
+    ///         Box::new(FilterExpr::Eq { field: "status".to_string(), value: DbValue::text("active") })
+    ///     ))
+    ///     .execute()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn not(self) -> NotBuilder {
+        NotBuilder { query: self }
     }
 
     /// 添加任意过滤表达式
@@ -2035,5 +2052,116 @@ impl DeleteBuilder {
         }
 
         Ok(count)
+    }
+}
+
+/// NOT 构建器 - 用于对单个过滤条件取反
+///
+/// 通过 `QueryBuilder::not()` 创建，提供所有过滤条件方法
+/// 调用任意过滤方法会将生成的表达式用 `Not` 包裹后添加到查询中
+pub struct NotBuilder {
+    query: QueryBuilder,
+}
+
+impl NotBuilder {
+    /// 添加任意过滤表达式（复杂场景）
+    ///
+    /// # 示例
+    /// ```rust,no_run
+    /// # use regulus_db::{Database, DbValue, FilterExpr};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = Database::new();
+    /// // 查询 NOT (age > 18 AND status = 'active')
+    /// db.query("users")
+    ///     .not()
+    ///     .expr(FilterExpr::And(
+    ///         Box::new(FilterExpr::Gt { field: "age".to_string(), value: DbValue::integer(18) }),
+    ///         Box::new(FilterExpr::Eq { field: "status".to_string(), value: DbValue::text("active") })
+    ///     ))
+    ///     .execute()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn expr(mut self, expr: FilterExpr) -> QueryBuilder {
+        self.query.filters.push(FilterExpr::Not(Box::new(expr)));
+        self.query
+    }
+
+    /// EQ 取反：不等于 (!=)
+    pub fn eq(self, field: &str, value: DbValue) -> QueryBuilder {
+        self.expr(FilterExpr::Eq {
+            field: field.to_string(),
+            value,
+        })
+    }
+
+    /// NE 取反：等于 (=)
+    pub fn ne(self, field: &str, value: DbValue) -> QueryBuilder {
+        self.expr(FilterExpr::Ne {
+            field: field.to_string(),
+            value,
+        })
+    }
+
+    /// LT 取反：大于等于 (>=)
+    pub fn lt(self, field: &str, value: DbValue) -> QueryBuilder {
+        self.expr(FilterExpr::Lt {
+            field: field.to_string(),
+            value,
+        })
+    }
+
+    /// LE 取反：大于 (>)
+    pub fn le(self, field: &str, value: DbValue) -> QueryBuilder {
+        self.expr(FilterExpr::Le {
+            field: field.to_string(),
+            value,
+        })
+    }
+
+    /// GT 取反：小于等于 (<=)
+    pub fn gt(self, field: &str, value: DbValue) -> QueryBuilder {
+        self.expr(FilterExpr::Gt {
+            field: field.to_string(),
+            value,
+        })
+    }
+
+    /// GE 取反：小于 (<)
+    pub fn ge(self, field: &str, value: DbValue) -> QueryBuilder {
+        self.expr(FilterExpr::Ge {
+            field: field.to_string(),
+            value,
+        })
+    }
+
+    /// IN 取反：NOT IN
+    pub fn in_list(self, field: &str, values: Vec<DbValue>) -> QueryBuilder {
+        self.expr(FilterExpr::In {
+            field: field.to_string(),
+            values,
+        })
+    }
+
+    /// CONTAINS 取反：NOT LIKE
+    pub fn contains(self, field: &str, value: &str) -> QueryBuilder {
+        self.expr(FilterExpr::Contains {
+            field: field.to_string(),
+            value: value.to_string(),
+        })
+    }
+
+    /// IS NULL 取反：IS NOT NULL
+    pub fn is_null(self, field: &str) -> QueryBuilder {
+        self.expr(FilterExpr::IsNull {
+            field: field.to_string(),
+        })
+    }
+
+    /// IS NOT NULL 取反：IS NULL
+    pub fn is_not_null(self, field: &str) -> QueryBuilder {
+        self.expr(FilterExpr::IsNotNull {
+            field: field.to_string(),
+        })
     }
 }

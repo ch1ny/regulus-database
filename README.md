@@ -183,12 +183,20 @@ let results = db.query("users")
     )
     .execute()?;
 
-// NOT 操作符：NOT (status = 'deleted')
+// NOT 操作符：简洁链式 API
+// 简单条件：NOT (status = 'deleted')
 let results = db.query("users")
-    .not(FilterExpr::Eq {
-        field: "status".to_string(),
-        value: DbValue::text("deleted")
-    })
+    .not()
+    .eq("status", DbValue::text("deleted"))
+    .execute()?;
+
+// 复杂条件：使用 expr() 传入 FilterExpr
+let results = db.query("users")
+    .not()
+    .expr(FilterExpr::And(
+        Box::new(FilterExpr::Gt { field: "age".to_string(), value: DbValue::integer(18) }),
+        Box::new(FilterExpr::Eq { field: "status".to_string(), value: DbValue::text("active") })
+    ))
     .execute()?;
 
 // 便捷方法

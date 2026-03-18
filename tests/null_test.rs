@@ -216,10 +216,10 @@ fn test_not_is_null() {
     ]).unwrap();
 
     // 使用 NOT + IS NULL 查询 phone 不为 NULL 的用户
-    use regulus_db::FilterExpr;
-
+    // 使用新的简洁 API：not().is_null() 相当于 IS NOT NULL
     let results = db.query("users")
-        .not(FilterExpr::IsNull { field: "phone".to_string() })
+        .not()
+        .is_null("phone")
         .order_by("id", regulus_db::Order::Asc)
         .execute()
         .unwrap();

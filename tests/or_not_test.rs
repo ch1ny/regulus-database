@@ -122,8 +122,10 @@ fn test_not_operator_basic() {
     ]).unwrap();
 
     // 查询 NOT (status = 'deleted')
+    // 使用新的简洁 API
     let results = db.query("users")
-        .not(FilterExpr::Eq { field: "status".to_string(), value: DbValue::text("deleted") })
+        .not()
+        .eq("status", DbValue::text("deleted"))
         .execute()
         .unwrap();
 
@@ -163,11 +165,10 @@ fn test_not_with_in_list() {
     ]).unwrap();
 
     // 查询 NOT (category IN ['electronics', 'books'])
+    // 使用新的简洁 API
     let results = db.query("products")
-        .not(FilterExpr::In {
-            field: "category".to_string(),
-            values: vec![DbValue::text("electronics"), DbValue::text("books")]
-        })
+        .not()
+        .in_list("category", vec![DbValue::text("electronics"), DbValue::text("books")])
         .execute()
         .unwrap();
 
@@ -439,11 +440,10 @@ fn test_not_with_contains() {
     ]).unwrap();
 
     // 查询 NOT (email contains 'test')
+    // 使用新的简洁 API
     let results = db.query("users")
-        .not(FilterExpr::Contains {
-            field: "email".to_string(),
-            value: "test".to_string()
-        })
+        .not()
+        .contains("email", "test")
         .execute()
         .unwrap();
 
