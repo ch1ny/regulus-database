@@ -3,11 +3,12 @@ use crate::persistence::PersistenceManager;
 use crate::persistence::wal::WalOperation;
 use crate::types::{TableSchema, DbResult};
 use std::path::Path;
+use std::sync::{Arc, RwLock};
 
 /// 持久化存储引擎
 /// 包装 MemoryEngine + PersistenceManager，提供 WAL 日志功能
 pub struct PersistedEngine {
-    inner: MemoryEngine,
+    inner: Arc<RwLock<MemoryEngine>>,
     persistence: PersistenceManager,
 }
 
@@ -18,7 +19,7 @@ impl PersistedEngine {
         let engine = persistence.restore()?;
 
         Ok(PersistedEngine {
-            inner: engine,
+            inner: Arc::new(RwLock::new(engine)),
             persistence,
         })
     }
@@ -36,22 +37,29 @@ impl PersistedEngine {
         let engine = MemoryEngine::new();
 
         Ok(PersistedEngine {
-            inner: engine,
+            inner: Arc::new(RwLock::new(engine)),
             persistence,
         })
+    }
+
+    /// 获取内部 MemoryEngine 的 Arc 克隆（用于 QueryBuilder 等）
+    pub fn inner_arc(&self) -> Arc<RwLock<MemoryEngine>> {
+        Arc::clone(&self.inner)
     }
 
     /// 手动触发检查点
     pub fn checkpoint(&mut self) -> DbResult<()> {
         if self.persistence.needs_checkpoint() {
-            self.persistence.checkpoint(&self.inner)?;
+            let engine = self.inner.read().unwrap();
+            self.persistence.checkpoint(&engine)?;
         }
         Ok(())
     }
 
     /// 强制触发检查点（无论 WAL 大小）
     pub fn force_checkpoint(&mut self) -> DbResult<()> {
-        self.persistence.checkpoint(&self.inner)?;
+        let engine = self.inner.read().unwrap();
+        self.persistence.checkpoint(&engine)?;
         Ok(())
     }
 
@@ -60,51 +68,41 @@ impl PersistedEngine {
         self.persistence.wal_size()
     }
 
-    /// 获取内部 MemoryEngine 的不可变引用
-    pub fn inner(&self) -> &MemoryEngine {
-        &self.inner
-    }
-
-    /// 获取内部 MemoryEngine 的可变引用（慎用，不会写 WAL）
-    pub fn inner_mut(&mut self) -> &mut MemoryEngine {
-        &mut self.inner
-    }
-
     // ========== 索引方法委托（委托给内部 MemoryEngine） ==========
 
     /// 为表列创建索引（单列）
     pub fn create_index(&mut self, table: &str, column: &str) -> DbResult<()> {
-        self.inner.create_index(table, column)
+        self.inner.write().unwrap().create_index(table, column)
     }
 
     /// 创建复合索引
     pub fn create_composite_index(&mut self, table: &str, columns: &[&str]) -> DbResult<()> {
-        self.inner.create_composite_index(table, columns)
+        self.inner.write().unwrap().create_composite_index(table, columns)
     }
 
     /// 创建唯一复合索引
     pub fn create_unique_index(&mut self, table: &str, columns: &[&str]) -> DbResult<()> {
-        self.inner.create_unique_index(table, columns)
+        self.inner.write().unwrap().create_unique_index(table, columns)
     }
 
     /// 删除索引
     pub fn drop_index(&mut self, table: &str, column: &str) -> DbResult<bool> {
-        self.inner.drop_index(table, column)
+        self.inner.write().unwrap().drop_index(table, column)
     }
 
     /// 删除复合索引
     pub fn drop_composite_index(&mut self, table: &str, columns: &[&str]) -> DbResult<bool> {
-        self.inner.drop_composite_index(table, columns)
+        self.inner.write().unwrap().drop_composite_index(table, columns)
     }
 
     /// 检查列是否有索引
     pub fn has_index(&self, table: &str, column: &str) -> bool {
-        self.inner.has_index(table, column)
+        self.inner.read().unwrap().has_index(table, column)
     }
 
     /// 检查复合索引是否存在
     pub fn has_composite_index(&self, table: &str, columns: &[&str]) -> bool {
-        self.inner.has_composite_index(table, columns)
+        self.inner.read().unwrap().has_composite_index(table, columns)
     }
 }
 
@@ -115,7 +113,7 @@ impl StorageEngine for PersistedEngine {
         self.persistence.log_operation(op)?;
 
         // 2. 再写内存
-        self.inner.create_table(schema)
+        self.inner.write().unwrap().create_table(schema)
     }
 
     fn drop_table(&mut self, name: &str) -> DbResult<()> {
@@ -124,43 +122,23 @@ impl StorageEngine for PersistedEngine {
         self.persistence.log_operation(op)?;
 
         // 2. 再写内存
-        self.inner.drop_table(name)
+        self.inner.write().unwrap().drop_table(name)
     }
 
     fn has_table(&self, name: &str) -> bool {
-        self.inner.has_table(name)
+        self.inner.read().unwrap().has_table(name)
     }
 
-    fn get_schema(&self, name: &str) -> DbResult<&TableSchema> {
-        self.inner.get_schema(name)
+    fn get_schema(&self, name: &str) -> DbResult<TableSchema> {
+        self.inner.read().unwrap().get_schema(name)
     }
 
     fn insert(&mut self, table: &str, row: Row) -> DbResult<RowId> {
         // 1. 先写 WAL（在获取 row_id 之前记录原始数据）
         let row_clone = row.clone();
-        // WAL 中的 row_id 会在插入后分配，这里先记录一个占位符
-        // 实际上我们需要在插入后更新 WAL，或者采用另一种策略：
-        // 在 WAL 中记录操作，恢复时重新执行操作来得到相同的 row_id
 
-        // 策略：WAL 中记录 Insert 操作，恢复时按顺序执行得到相同的 row_id
-        // 所以这里先写 WAL（row_id 会在恢复时确定），然后再插入内存
-        // 但这样有问题：WAL 中的 row_id 和实际的不一致
-
-        // 更好的策略：WAL 中记录操作类型和参数，不记录 row_id
-        // 恢复时重新执行操作，自然得到正确的 row_id
-        // 但这需要修改 WalOperation 的定义
-
-        // 当前实现：先插入内存获取 row_id，然后写 WAL
-        // 风险：如果写 WAL 失败，内存中已经有了这个 row
-        // 解决方案：使用事务，或者在 WAL 失败时回滚
-
-        // 简单实现：先写 WAL（不带 row_id），再插入
-        // 恢复时按顺序重放得到相同的 row_id
-        // 但这样需要从 WalOperation 中移除 row_id
-
-        // 最简实现：先插入获取 row_id，然后写 WAL
-        // 如果 WAL 失败，返回错误但不回滚（对于演示目的）
-        let row_id = self.inner.insert(table, row_clone.clone())?;
+        // 2. 插入内存获取 row_id
+        let row_id = self.inner.write().unwrap().insert(table, row_clone.clone())?;
 
         let op = WalOperation::Insert {
             table: table.to_string(),
@@ -171,22 +149,26 @@ impl StorageEngine for PersistedEngine {
 
         // 检查是否需要自动检查点
         if self.persistence.needs_checkpoint() {
-            self.persistence.checkpoint(&self.inner)?;
+            let engine = self.inner.read().unwrap();
+            self.persistence.checkpoint(&engine)?;
         }
 
         Ok(row_id)
     }
 
-    fn get(&self, table: &str, row_id: RowId) -> DbResult<Option<&Row>> {
-        self.inner.get(table, row_id)
+    fn get(&self, table: &str, row_id: RowId) -> DbResult<Option<Row>> {
+        self.inner.read().unwrap().get(table, row_id)
     }
 
     fn update(&mut self, table: &str, row_id: RowId, values: Row) -> DbResult<()> {
-        // 先写内存获取旧值（用于 WAL 记录）
-        let old_row = self.inner.get(table, row_id)?.cloned();
+        // 先获取旧值（用于 WAL 记录）
+        let old_row = {
+            let inner = self.inner.read().unwrap();
+            inner.get(table, row_id)?
+        };
 
         // 执行更新
-        self.inner.update(table, row_id, values.clone())?;
+        self.inner.write().unwrap().update(table, row_id, values.clone())?;
 
         // 根据是否有旧值决定写 Insert 还是 Update
         let op = match old_row {
@@ -205,7 +187,8 @@ impl StorageEngine for PersistedEngine {
 
         // 检查是否需要自动检查点
         if self.persistence.needs_checkpoint() {
-            self.persistence.checkpoint(&self.inner)?;
+            let engine = self.inner.read().unwrap();
+            self.persistence.checkpoint(&engine)?;
         }
 
         Ok(())
@@ -213,10 +196,13 @@ impl StorageEngine for PersistedEngine {
 
     fn delete(&mut self, table: &str, row_id: RowId) -> DbResult<Option<Row>> {
         // 先获取要删除的行
-        let _deleted_row = self.inner.get(table, row_id)?.cloned();
+        let deleted_row = {
+            let inner = self.inner.read().unwrap();
+            inner.get(table, row_id)?
+        };
 
         // 执行删除
-        let result = self.inner.delete(table, row_id)?;
+        let _ = self.inner.write().unwrap().delete(table, row_id)?;
 
         // 写 WAL
         let op = WalOperation::Delete {
@@ -227,14 +213,15 @@ impl StorageEngine for PersistedEngine {
 
         // 检查是否需要自动检查点
         if self.persistence.needs_checkpoint() {
-            self.persistence.checkpoint(&self.inner)?;
+            let engine = self.inner.read().unwrap();
+            self.persistence.checkpoint(&engine)?;
         }
 
-        Ok(result)
+        Ok(deleted_row)
     }
 
-    fn scan(&self, table: &str) -> DbResult<Vec<(RowId, &Row)>> {
-        self.inner.scan(table)
+    fn scan(&self, table: &str) -> DbResult<Vec<(RowId, Row)>> {
+        self.inner.read().unwrap().scan(table)
     }
 }
 
@@ -336,12 +323,14 @@ mod tests {
         let engine = PersistedEngine::open(temp_dir.path()).unwrap();
 
         // 3. 验证数据
-        assert_eq!(engine.inner().get_row_count("users").unwrap(), 2);
+        let engine_arc = engine.inner_arc();
+        let inner = engine_arc.read().unwrap();
+        assert_eq!(inner.get_row_count("users").unwrap(), 2);
 
-        let row1 = engine.inner().get("users", RowId(0)).unwrap().unwrap();
+        let row1 = inner.get("users", RowId(0)).unwrap().unwrap();
         assert_eq!(row1.get("name").unwrap().as_text(), Some("Alice"));
 
-        let row2 = engine.inner().get("users", RowId(1)).unwrap().unwrap();
+        let row2 = inner.get("users", RowId(1)).unwrap().unwrap();
         assert_eq!(row2.get("name").unwrap().as_text(), Some("Bob"));
     }
 }

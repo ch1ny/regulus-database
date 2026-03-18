@@ -252,7 +252,7 @@ impl QueryBuilder {
         for row_id in row_ids {
             if let Some(row) = engine.get(&self.table, row_id)? {
                 // 需要验证所有过滤条件（因为索引只针对一个字段）
-                if self.matches_all_filters(row) {
+                if self.matches_all_filters(&row) {
                     results.push(row.clone());
                 }
             }
@@ -282,7 +282,7 @@ impl QueryBuilder {
         for row_id in row_ids {
             if let Some(row) = engine.get(&self.table, row_id)? {
                 // 验证所有过滤条件
-                if self.matches_all_filters(row) {
+                if self.matches_all_filters(&row) {
                     results.push(row.clone());
                 }
             }
@@ -495,7 +495,7 @@ impl QueryBuilder {
             let main_table_rows = engine.scan(&self.table)?;
 
             for (_row_id, main_row) in main_table_rows {
-                let main_prefixed = self.prefix_row(main_row, &self.table);
+                let main_prefixed = self.prefix_row(&main_row, &self.table);
 
                 // 使用优化后的 JOIN 顺序
                 self.process_joins_with_order(engine, main_prefixed, 0, &mut results, &optimized_joins)?;
@@ -564,13 +564,13 @@ impl QueryBuilder {
 
             // 处理右表的每一行
             for (_right_id, right_row) in right_table_rows {
-                let right_prefixed = self.prefix_row(right_row, &join.right_table);
+                let right_prefixed = self.prefix_row(&right_row, &join.right_table);
 
                 // 为每个右表行查找左表匹配
                 let mut has_match = false;
 
                 for (left_id, left_row) in &left_table_rows {
-                    let left_prefixed = self.prefix_row(left_row, &self.table);
+                    let left_prefixed = self.prefix_row(&left_row, &self.table);
 
                     if self.match_join_condition(&left_prefixed, &right_prefixed, join) {
                         has_match = true;
@@ -598,7 +598,7 @@ impl QueryBuilder {
             if is_full {
                 for (left_id, left_row) in &left_table_rows {
                     if !matched_left_row_ids.contains(left_id) {
-                        let left_prefixed = self.prefix_row(left_row, &self.table);
+                        let left_prefixed = self.prefix_row(&left_row, &self.table);
                         let null_row = self.create_null_row(engine, &join.right_table)?;
                         let mut merged = left_prefixed;
                         merged.extend(null_row);
@@ -692,7 +692,7 @@ impl QueryBuilder {
         let mut has_match = false;
 
         for (_right_id, right_row) in right_rows {
-            let right_prefixed = self.prefix_row(right_row, &join.right_table);
+            let right_prefixed = self.prefix_row(&right_row, &join.right_table);
 
             // 检查 JOIN 条件
             if self.match_join_condition(&current_row, &right_prefixed, join) {
@@ -745,7 +745,7 @@ impl QueryBuilder {
         for row_id in matching_row_ids {
             has_match = true;
             if let Some(right_row) = engine.get(&join.right_table, row_id)? {
-                let right_prefixed = self.prefix_row(right_row, &join.right_table);
+                let right_prefixed = self.prefix_row(&right_row, &join.right_table);
                 let mut merged = current_row.clone();
                 merged.extend(right_prefixed);
 
@@ -816,7 +816,7 @@ impl QueryBuilder {
         let mut has_match = false;
 
         for (_right_id, right_row) in right_rows {
-            let right_prefixed = self.prefix_row(right_row, &join.right_table);
+            let right_prefixed = self.prefix_row(&right_row, &join.right_table);
 
             // 检查 JOIN 条件
             if self.match_join_condition(&current_row, &right_prefixed, join) {
@@ -868,7 +868,7 @@ impl QueryBuilder {
         for row_id in matching_row_ids {
             has_match = true;
             if let Some(right_row) = engine.get(&join.right_table, row_id)? {
-                let right_prefixed = self.prefix_row(right_row, &join.right_table);
+                let right_prefixed = self.prefix_row(&right_row, &join.right_table);
                 let mut merged = current_row.clone();
                 for (k, v) in right_prefixed {
                     merged.insert(k, v);
@@ -1680,7 +1680,7 @@ impl UpdateBuilder {
         // 先收集需要更新的 row_id
         let mut to_update = Vec::new();
         for (row_id, row) in rows {
-            let matches = self.filters.iter().all(|expr| evaluate_filter(expr, row));
+            let matches = self.filters.iter().all(|expr| evaluate_filter(expr, &row));
             if matches {
                 to_update.push(row_id);
             }
@@ -1754,7 +1754,7 @@ impl DeleteBuilder {
         // 先收集需要删除的 row_id
         let mut to_delete = Vec::new();
         for (row_id, row) in rows {
-            let matches = self.filters.iter().all(|expr| evaluate_filter(expr, row));
+            let matches = self.filters.iter().all(|expr| evaluate_filter(expr, &row));
             if matches {
                 to_delete.push(row_id);
             }

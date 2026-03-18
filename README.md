@@ -89,13 +89,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     db.create_table("users", vec![
         Column::new("id", DataType::integer()).primary_key(),
         Column::new("name", DataType::text()),
+        Column::new("age", DataType::integer()),
     ])?;
 
     // 插入数据（自动记录 WAL）
     db.insert("users", vec![
         ("id", DbValue::integer(1)),
         ("name", DbValue::text("Alice")),
+        ("age", DbValue::integer(25)),
     ])?;
+
+    // 查询数据（持久化模式同样支持完整的查询构建器）
+    let results = db.query("users")
+        .ge("age", DbValue::integer(18))
+        .execute()?;
+
+    // 更新数据
+    db.update("users")
+        .eq("id", DbValue::integer(1))
+        .set("age", DbValue::integer(26))
+        .execute()?;
+
+    // 删除数据
+    db.delete("users")
+        .eq("id", DbValue::integer(1))
+        .execute()?;
 
     Ok(())
 }

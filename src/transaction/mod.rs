@@ -104,11 +104,17 @@ impl<'a> Transaction<'a> {
 
     /// 插入数据
     pub fn insert(&mut self, table: &str, values: Vec<(&str, DbValue)>) -> DbResult<RowId> {
+        // 获取 schema
+        let schema = self.engine.get_schema(table)?.clone();
+
         // 构建行
         let mut row = Row::new();
         for (name, value) in values {
             row.insert(name.to_string(), value);
         }
+
+        // 填充默认值
+        schema.fill_defaults(&mut row);
 
         // 执行插入
         let row_id = self.engine.insert(table, row.clone())?;
@@ -354,5 +360,71 @@ mod tests {
         let rows = engine.scan("users").unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].1.get("name").unwrap().as_text(), Some("Alice"));
+    }
+
+    #[test]
+    fn test_transaction_insert_with_default_values_rollback() {
+        let mut engine = MemoryEngine::new();
+        let schema = TableSchema::new(
+            "users",
+            vec![
+                Column::new("id", DataType::integer()).primary_key(),
+                Column::new("name", DataType::text()).not_null(),
+                Column::new("status", DataType::text()).default(DbValue::text("active")),
+                Column::new("age", DataType::integer()).default(DbValue::integer(0)),
+                Column::new("active", DataType::boolean()).default(DbValue::boolean(true)),
+            ],
+        );
+        engine.create_table(schema).unwrap();
+
+        {
+            let mut tx = Transaction::new(&mut engine);
+            // 插入时依赖默认值
+            tx.insert("users", vec![
+                ("id", DbValue::integer(1)),
+                ("name", DbValue::text("Alice")),
+            ]).unwrap();
+
+            // 回滚
+            tx.rollback().unwrap();
+        }
+
+        // 验证回滚后数据不存在（包括默认值填充的字段）
+        let rows = engine.scan("users").unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn test_transaction_insert_with_default_values_commit() {
+        let mut engine = MemoryEngine::new();
+        let schema = TableSchema::new(
+            "users",
+            vec![
+                Column::new("id", DataType::integer()).primary_key(),
+                Column::new("name", DataType::text()).not_null(),
+                Column::new("status", DataType::text()).default(DbValue::text("active")),
+                Column::new("age", DataType::integer()).default(DbValue::integer(0)),
+            ],
+        );
+        engine.create_table(schema).unwrap();
+
+        {
+            let mut tx = Transaction::new(&mut engine);
+            // 插入时依赖默认值
+            tx.insert("users", vec![
+                ("id", DbValue::integer(1)),
+                ("name", DbValue::text("Alice")),
+            ]).unwrap();
+
+            // 提交
+            tx.commit().unwrap();
+        }
+
+        // 验证提交后默认值已正确填充
+        let rows = engine.scan("users").unwrap();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0].1;
+        assert_eq!(row.get("status").unwrap().as_text(), Some("active"));
+        assert_eq!(row.get("age").unwrap().as_integer(), Some(0));
     }
 }

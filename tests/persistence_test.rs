@@ -93,12 +93,14 @@ fn test_persisted_recovery() {
     let engine = PersistedEngine::open(temp_dir.path()).unwrap();
 
     // 3. 验证数据
-    assert_eq!(engine.inner().get_row_count("users").unwrap(), 2);
+    let engine_arc = engine.inner_arc();
+    let inner = engine_arc.read().unwrap();
+    assert_eq!(inner.get_row_count("users").unwrap(), 2);
 
-    let row1 = engine.inner().get("users", RowId(0)).unwrap().unwrap();
+    let row1 = inner.get("users", RowId(0)).unwrap().unwrap();
     assert_eq!(row1.get("name").unwrap().as_text(), Some("Alice"));
 
-    let row2 = engine.inner().get("users", RowId(1)).unwrap().unwrap();
+    let row2 = inner.get("users", RowId(1)).unwrap().unwrap();
     assert_eq!(row2.get("name").unwrap().as_text(), Some("Bob"));
 }
 
@@ -127,7 +129,9 @@ fn test_persisted_update() {
     drop(engine);
 
     let engine = PersistedEngine::open(temp_dir.path()).unwrap();
-    let retrieved = engine.inner().get("users", row_id).unwrap().unwrap();
+    let engine_arc = engine.inner_arc();
+    let inner = engine_arc.read().unwrap();
+    let retrieved = inner.get("users", row_id).unwrap().unwrap();
     assert_eq!(retrieved.get("age").unwrap().as_integer(), Some(26));
 }
 
@@ -153,7 +157,9 @@ fn test_persisted_delete() {
     drop(engine);
 
     let engine = PersistedEngine::open(temp_dir.path()).unwrap();
-    assert_eq!(engine.inner().get_row_count("users").unwrap(), 0);
+    let engine_arc = engine.inner_arc();
+    let inner = engine_arc.read().unwrap();
+    assert_eq!(inner.get_row_count("users").unwrap(), 0);
 }
 
 #[test]
@@ -173,7 +179,9 @@ fn test_persisted_drop_table() {
     drop(engine);
 
     let engine = PersistedEngine::open(temp_dir.path()).unwrap();
-    assert!(!engine.inner().has_table("users"));
+    let engine_arc = engine.inner_arc();
+    let inner = engine_arc.read().unwrap();
+    assert!(!inner.has_table("users"));
 }
 
 #[test]
@@ -196,9 +204,11 @@ fn test_wal_only_recovery() {
     let engine = PersistedEngine::open(temp_dir.path()).unwrap();
 
     // 3. 验证数据（应该从 WAL 恢复）
-    assert_eq!(engine.inner().get_row_count("users").unwrap(), 1);
+    let engine_arc = engine.inner_arc();
+    let inner = engine_arc.read().unwrap();
+    assert_eq!(inner.get_row_count("users").unwrap(), 1);
 
-    let row1 = engine.inner().get("users", RowId(0)).unwrap().unwrap();
+    let row1 = inner.get("users", RowId(0)).unwrap().unwrap();
     assert_eq!(row1.get("name").unwrap().as_text(), Some("Alice"));
 }
 
@@ -234,5 +244,7 @@ fn test_multiple_checkpoints() {
     // 重启验证
     drop(engine);
     let engine = PersistedEngine::open(temp_dir.path()).unwrap();
-    assert_eq!(engine.inner().get_row_count("users").unwrap(), 6);
+    let engine_arc = engine.inner_arc();
+    let inner = engine_arc.read().unwrap();
+    assert_eq!(inner.get_row_count("users").unwrap(), 6);
 }

@@ -172,6 +172,21 @@ impl TableSchema {
         self.columns.iter().find(|c| c.primary_key)
     }
 
+    /// 填充行的默认值
+    /// 对于行中缺少的列，如果该列有默认值，则自动填充
+    pub fn fill_defaults(&self, row: &mut crate::storage::Row) {
+        for column in &self.columns {
+            // 如果行中已经有该列的值，跳过
+            if row.contains_key(&column.name) {
+                continue;
+            }
+            // 如果该列有默认值，填充
+            if let Some(ref default_value) = column.default_value {
+                row.insert(column.name.clone(), default_value.clone());
+            }
+        }
+    }
+
     /// 验证行值是否与 schema 匹配
     pub fn validate(&self, values: &[(String, DbValue)]) -> Result<(), SchemaError> {
         for (name, value) in values {
@@ -222,6 +237,7 @@ pub enum SchemaError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::Row;
 
     #[test]
     fn test_column_builder() {
@@ -259,5 +275,60 @@ mod tests {
         ];
 
         assert!(schema.validate(&valid_values).is_ok());
+    }
+
+    #[test]
+    fn test_fill_defaults() {
+        let schema = TableSchema::new(
+            "users",
+            vec![
+                Column::new("id", DataType::integer()).primary_key(),
+                Column::new("name", DataType::text()).not_null(),
+                Column::new("status", DataType::text()).default(DbValue::text("active")),
+                Column::new("age", DataType::integer()).default(DbValue::integer(0)),
+                Column::new("active", DataType::boolean()).default(DbValue::boolean(true)),
+            ],
+        );
+
+        // 只填充部分字段
+        let mut row = Row::new();
+        row.insert("id".to_string(), DbValue::integer(1));
+        row.insert("name".to_string(), DbValue::text("Alice"));
+
+        // 填充默认值
+        schema.fill_defaults(&mut row);
+
+        // 验证默认值已填充
+        assert_eq!(row.get("status").unwrap().as_text(), Some("active"));
+        assert_eq!(row.get("age").unwrap().as_integer(), Some(0));
+        assert_eq!(row.get("active").unwrap().as_boolean(), Some(true));
+
+        // 验证原有值未被覆盖
+        assert_eq!(row.get("id").unwrap().as_integer(), Some(1));
+        assert_eq!(row.get("name").unwrap().as_text(), Some("Alice"));
+    }
+
+    #[test]
+    fn test_fill_defaults_with_explicit_value() {
+        let schema = TableSchema::new(
+            "users",
+            vec![
+                Column::new("id", DataType::integer()).primary_key(),
+                Column::new("name", DataType::text()).not_null(),
+                Column::new("status", DataType::text()).default(DbValue::text("active")),
+            ],
+        );
+
+        // 显式提供所有字段的值
+        let mut row = Row::new();
+        row.insert("id".to_string(), DbValue::integer(1));
+        row.insert("name".to_string(), DbValue::text("Bob"));
+        row.insert("status".to_string(), DbValue::text("inactive"));
+
+        // 填充默认值
+        schema.fill_defaults(&mut row);
+
+        // 验证显式值未被覆盖
+        assert_eq!(row.get("status").unwrap().as_text(), Some("inactive"));
     }
 }

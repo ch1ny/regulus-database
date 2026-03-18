@@ -130,6 +130,9 @@ impl Database {
             row.insert(name.to_string(), value);
         }
 
+        // 填充默认值
+        schema.fill_defaults(&mut row);
+
         // 验证 schema
         let values_ref: Vec<(String, DbValue)> = row.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         schema.validate(&values_ref)?;
@@ -142,49 +145,62 @@ impl Database {
         match &self.engine {
             DatabaseEngine::Memory(engine) => {
                 let e = engine.read().unwrap();
-                e.get(table, row_id).map(|opt| opt.cloned())
+                e.get(table, row_id)
             }
             DatabaseEngine::Persisted(engine) => {
                 let e = engine.read().unwrap();
-                e.get(table, row_id).map(|opt| opt.cloned())
+                e.get(table, row_id)
             }
         }
     }
 
-    /// 查询构建器（仅支持内存模式）
+    /// 查询构建器
+    ///
+    /// 内存模式：返回完整的 QueryBuilder，支持所有功能
+    /// 持久化模式：同样支持 QueryBuilder（通过内部 MemoryEngine 的 Arc）
     pub fn query(&self, table: &str) -> QueryBuilder {
         match &self.engine {
             DatabaseEngine::Memory(engine) => {
                 QueryBuilder::new(table.to_string(), Arc::clone(engine))
             }
-            DatabaseEngine::Persisted(_) => {
-                // 持久化模式需要使用 engine 内部的 MemoryEngine
-                // 这里提供一个简化的查询接口
-                unimplemented!("Query builder for persisted engine - use transaction for now")
+            DatabaseEngine::Persisted(engine) => {
+                // 持久化模式：使用 PersistedEngine 内部的 MemoryEngine Arc
+                let e = engine.read().unwrap();
+                QueryBuilder::new(table.to_string(), e.inner_arc())
             }
         }
     }
 
-    /// 更新构建器（仅支持内存模式）
+    /// 更新构建器
+    ///
+    /// 内存模式：返回完整的 UpdateBuilder，支持所有功能
+    /// 持久化模式：同样支持 UpdateBuilder（通过内部 MemoryEngine 的 Arc）
     pub fn update(&self, table: &str) -> UpdateBuilder {
         match &self.engine {
             DatabaseEngine::Memory(engine) => {
                 UpdateBuilder::new(table.to_string(), Arc::clone(engine))
             }
-            DatabaseEngine::Persisted(_) => {
-                unimplemented!("Update builder for persisted engine - use transaction for now")
+            DatabaseEngine::Persisted(engine) => {
+                // 持久化模式：使用 PersistedEngine 内部的 MemoryEngine Arc
+                let e = engine.read().unwrap();
+                UpdateBuilder::new(table.to_string(), e.inner_arc())
             }
         }
     }
 
-    /// 删除构建器（仅支持内存模式）
+    /// 删除构建器
+    ///
+    /// 内存模式：返回完整的 DeleteBuilder，支持所有功能
+    /// 持久化模式：同样支持 DeleteBuilder（通过内部 MemoryEngine 的 Arc）
     pub fn delete(&self, table: &str) -> DeleteBuilder {
         match &self.engine {
             DatabaseEngine::Memory(engine) => {
                 DeleteBuilder::new(table.to_string(), Arc::clone(engine))
             }
-            DatabaseEngine::Persisted(_) => {
-                unimplemented!("Delete builder for persisted engine - use transaction for now")
+            DatabaseEngine::Persisted(engine) => {
+                // 持久化模式：使用 PersistedEngine 内部的 MemoryEngine Arc
+                let e = engine.read().unwrap();
+                DeleteBuilder::new(table.to_string(), e.inner_arc())
             }
         }
     }
@@ -434,5 +450,56 @@ mod tests {
             }
             _ => {}
         }
+    }
+
+    #[test]
+    fn test_insert_with_default_values() {
+        let db = Database::new();
+        let columns = vec![
+            Column::new("id", DataType::integer()).primary_key(),
+            Column::new("name", DataType::text()).not_null(),
+            Column::new("status", DataType::text()).default(DbValue::text("active")),
+            Column::new("age", DataType::integer()).default(DbValue::integer(0)),
+            Column::new("active", DataType::boolean()).default(DbValue::boolean(true)),
+        ];
+        db.create_table("users", columns).unwrap();
+
+        // 只插入部分字段，依赖默认值
+        db.insert("users", vec![
+            ("id", DbValue::integer(1)),
+            ("name", DbValue::text("Alice")),
+        ]).unwrap();
+
+        // 验证默认值已填充
+        let row = db.query("users").eq("id", DbValue::integer(1)).execute().unwrap();
+        assert_eq!(row.len(), 1);
+        assert_eq!(row[0].get("status").unwrap().as_text(), Some("active"));
+        assert_eq!(row[0].get("age").unwrap().as_integer(), Some(0));
+        assert_eq!(row[0].get("active").unwrap().as_boolean(), Some(true));
+    }
+
+    #[test]
+    fn test_transaction_insert_with_default_values() {
+        let db = Database::new();
+        let columns = vec![
+            Column::new("id", DataType::integer()).primary_key(),
+            Column::new("name", DataType::text()).not_null(),
+            Column::new("status", DataType::text()).default(DbValue::text("active")),
+        ];
+        db.create_table("users", columns).unwrap();
+
+        // 在事务中插入，依赖默认值
+        db.transaction(|tx| {
+            tx.insert("users", vec![
+                ("id", DbValue::integer(1)),
+                ("name", DbValue::text("Alice")),
+            ])?;
+            Ok(())
+        }).unwrap();
+
+        // 验证默认值已填充
+        let row = db.query("users").eq("id", DbValue::integer(1)).execute().unwrap();
+        assert_eq!(row.len(), 1);
+        assert_eq!(row[0].get("status").unwrap().as_text(), Some("active"));
     }
 }
