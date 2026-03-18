@@ -147,6 +147,7 @@ pub struct QueryBuilder {
     aggregate: Option<AggregateExpr>,    // 聚合函数
     group_by: Vec<String>,               // GROUP BY 字段
     having: Option<HavingExpr>,          // HAVING 子句
+    distinct: bool,                      // DISTINCT 去重标志
 }
 
 impl QueryBuilder {
@@ -163,6 +164,7 @@ impl QueryBuilder {
             aggregate: None,
             group_by: Vec::new(),
             having: None,
+            distinct: false,
         }
     }
 
@@ -403,6 +405,60 @@ impl QueryBuilder {
         row.iter()
             .map(|(k, v)| (format!("{}.{}", table, k), v.clone()))
             .collect::<Row>()
+    }
+
+    /// DISTINCT 去重：根据 selected_columns 对行进行去重
+    /// 如果 selected_columns 为空，则对所有列去重
+    fn deduplicate_rows(&self, rows: Vec<Row>) -> Vec<Row> {
+        use std::collections::HashSet;
+
+        // 确定用于去重的列索引
+        let dedup_column_indices: Option<Vec<usize>> = if self.selected_columns.is_empty() {
+            None // 使用所有列
+        } else {
+            // 获取第一行的列名用于映射
+            rows.first().map(|first_row| {
+                let all_columns: Vec<&String> = first_row.iter().map(|(k, _)| k).collect();
+                self.selected_columns.iter()
+                    .map(|sel| {
+                        // 尝试找到匹配的列索引
+                        all_columns.iter().position(|col| {
+                            col.as_str() == sel.as_str() ||
+                            col.ends_with(&format!(".{}", sel)) ||
+                            (sel.contains('.') && col.as_str() == sel.as_str())
+                        }).unwrap_or(0)
+                    })
+                    .collect()
+            })
+        };
+
+        let mut seen = HashSet::new();
+        let mut result = Vec::new();
+
+        for row in rows {
+            // 构建去重键
+            let key: Vec<&DbValue> = match &dedup_column_indices {
+                Some(indices) => {
+                    indices.iter()
+                        .filter_map(|&i| row.iter().nth(i).map(|(_, v)| v))
+                        .collect()
+                }
+                None => {
+                    row.iter().map(|(_, v)| v).collect()
+                }
+            };
+
+            // 使用序列化的键进行去重
+            let serialized_key: Vec<String> = key.iter()
+                .map(|v| format!("{:?}", v))
+                .collect();
+
+            if seen.insert(serialized_key) {
+                result.push(row);
+            }
+        }
+
+        result
     }
 
     /// 创建 NULL 行（用于 LEFT/RIGHT JOIN 无匹配时）
@@ -1300,6 +1356,28 @@ impl QueryBuilder {
         self
     }
 
+    // ==================== DISTINCT ====================
+
+    /// SELECT DISTINCT - 去重查询
+    ///
+    /// # 示例
+    /// ```rust,no_run
+    /// # use regulus_db::{Database, DbValue};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = Database::new();
+    /// // 查询所有不同的部门
+    /// db.query("employees")
+    ///     .select(&["department"])
+    ///     .distinct()
+    ///     .execute()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn distinct(mut self) -> Self {
+        self.distinct = true;
+        self
+    }
+
     // ==================== GROUP BY 和 HAVING ====================
 
     /// GROUP BY 子句
@@ -1381,6 +1459,11 @@ impl QueryBuilder {
             })
             .map(|(_, row)| row.clone())
             .collect();
+
+        // DISTINCT 去重
+        if self.distinct {
+            filtered = self.deduplicate_rows(filtered);
+        }
 
         // 排序
         if let Some((ref field, order)) = self.order_by {
